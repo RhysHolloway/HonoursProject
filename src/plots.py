@@ -1,0 +1,172 @@
+import os
+import sys
+from typing import Final
+
+from model import run_models_on_data, resample_df, pd
+from lstm import lstm_tipping_points, fixed_length_sequence
+from hmm import hmm_tipping_points
+
+PATH: Final[str] = os.path.dirname(os.path.realpath(sys.argv[0]))
+DATA_PATH: Final[str] = os.path.join(PATH, "..", "data")
+
+def Lisiecki2005():   
+    run_models_on_data(
+        name="Lisiecki (2005)",
+        df=lambda: pd.read_csv(os.path.join(DATA_PATH, "lisiecki2005-d18o-stack-noaa.csv"), comment='#', header=0, sep='\t'),
+        age_col="age_calkaBP",
+        feature_cols=["d18O_benthic", "d18O_error"],
+        transform=lambda df, age_col, feature_cols: resample_df(df, age_col=age_col, feature_cols=feature_cols, steps=1),
+        age_format="kya",
+        models=[
+            hmm_tipping_points(
+                n_regimes=5, # Lowest BIC
+                # min_state_duration=50,
+                # min_duration_between_switches=100,
+                p_threshold=0.95
+            ),
+            lstm_tipping_points(
+                sequencer=fixed_length_sequence(16),
+                train_fraction=0.4,
+                threshold=[90],
+                epochs=300,
+                smoothing_window=10,
+                distance=100,
+            )
+        ],
+    )
+    
+Lisiecki2005()
+
+def Scoteseetal2021():
+    run_models_on_data(
+        name="Scotese et al. (2021)",
+        df=lambda: pd.read_excel(os.path.join(DATA_PATH, "Part 4. Phanerozoic_Paleotemperature_Summaryv4.xlsx"), sheet_name="Master", header=[0,1]),
+        age_col=("Age", 'Unnamed: 0_level_1'),
+        feature_cols=[
+            ("Average", "Tropical"),
+            ("Average", "Deep Ocean"), 
+            ("Average", "∆T trop"),
+            ("North", "Polar >67˚N"), 
+            ("South", "Polar <67˚S")
+        ],
+        models = [
+            hmm_tipping_points(
+                min_covar=1e-4,
+                p_threshold=0.7,
+                min_state_duration=30,
+                min_duration_between_switches=50,
+            ),
+            lstm_tipping_points(
+                sequencer=fixed_length_sequence(4),
+                train_fraction=0.4,
+                threshold=[92.5, 95, 99],
+                epochs=300
+            ),
+        ]
+    )
+    
+# Lisiecki2005()
+# Scoteseetal2021()    
+    
+def Juddetal2024():
+    run_models_on_data(
+        name="Judd et. al. (2024)",
+        df=lambda: pd.read_csv(os.path.join(DATA_PATH, "PhanDA_GMSTandCO2_percentiles.csv")),
+        age_col="AverageAge",
+        feature_cols=[
+            "GMST_05", "GMST_95",
+            "GMST_16", "GMST_84",
+            "GMST_50",
+            "CO2_05", "CO2_95",
+            "CO2_16", "CO2_84",
+            "CO2_50",
+        ],
+        transform=lambda df, age_col, feature_cols: resample_df(df, age_col=age_col, feature_cols=feature_cols, steps=2),
+        models=[
+            hmm_tipping_points(
+                n_regimes=3
+            ),
+            lstm_tipping_points(
+                sequencer=fixed_length_sequence(4),
+                train_fraction=0.35,
+                threshold=95,
+                epochs=400,
+                patience=35,
+                distance=30,
+            ),
+        ]
+    )
+    
+# Juddetal2024()
+    
+
+# def Fosteretal2017():        
+#     detect_tipping_point(
+#         name="Foster, G. L., et al. (2017)",
+#         df=lambda: pd.read_excel(os.path.join(DATA_PATH, "41467_2017_BFncomms14845_MOESM2874_ESM.xlsx"), sheet_name="proxies", header=[1,2,3]),
+#         age_col=('Age', '(Ma)'),
+#         feature_cols=[
+#             'Î´13c_permille', 'select_d13c_permille', 
+#             'sauerstof_isotop_permille', 
+#             'select_d18o_permille (arag-0.6)', 
+#             "T (-1.08‰) arag, bel corr"
+#         ],
+#         transform=lambda df, age_col, feature_cols: resample_df(df, age_col=age_col, feature_cols=feature_cols, steps=2),
+#         model=[
+#             hmm_tipping_points(),
+#             lstm_tipping_points(
+#                 sequencer=fixed_length_sequence(8),
+#                 train_fraction=0.4,
+#                 threshold=99,
+#                 epochs=150,
+#                 patience=30,            
+#             ),
+#         ],
+#         verbose=True
+#     )
+
+# Fosteretal2017()
+
+# def PhanSST():
+
+#     existing_cols = [
+#         # "MgCa", "SrCa", "MnSr",
+#         # "GDGT0", "GDGT1", "GDGT2", "GDGT3",
+#         # "BIT", "MI"
+#     ]
+    
+#     def transform(df, age_col, feature_cols): 
+#             df = df.pivot_table(index=[age_col], columns='ProxyType', values='ProxyValue', aggfunc="mean").join(
+#                 df.set_index([age_col])
+#                 [existing_cols]
+#                 .drop_duplicates()
+#             ).reset_index()
+#             df = prepare_df(df, age_col, feature_cols)
+#             return resample_df(df, age_col, feature_cols, step_years=0.1)
+
+#     detect_tipping_point(
+#         name="PhanSST",
+#         df=lambda: pd.read_csv(os.path.join(DATA_PATH, "PhanSST_v001.csv")),
+#         model=hmm_tipping_points(),
+#         # model=lstm_tipping_points(
+#         #     seq_len=30,
+#         #     train_fraction=0.4,
+#         #     threshold=95,
+#         #     latent_dim=32,
+#         #     batch_size=16,
+#         #     distance=10,
+#         #     epochs=200,
+#         #     patience=35,
+#         # ),
+#         transform=transform,
+#         age_col='Age',
+#         feature_cols=existing_cols + [
+#             "d18c", "d18p", "mg", "tex", "uk",
+#             # "ProxyValue"
+#         ],
+#         verbose=True
+#     )
+
+# MOESM1_ESM()
+# PhanSST()
+# Juddetal2024()
