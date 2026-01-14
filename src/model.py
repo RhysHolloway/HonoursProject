@@ -1,68 +1,27 @@
 from typing import Any, Callable, Union
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
-import sys
 import time
+from util import get_project_path
+import os
 
-OUTPUT_PATH = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "../output")
+OUTPUT_PATH = get_project_path("../output")
 PRINT, PLOT = True, True
 
-def filter_points(points, ages, scores, min_distance: Union[float, int]):
-
-    # Sort peaks by descending height (strongest first)
-    order = np.argsort(-scores)
-    sorted_peaks = points[order]
-
-    kept = []
-    used = np.zeros(len(sorted_peaks), dtype=bool)
-
-    for i, p in enumerate(sorted_peaks):
-        if used[i]:
-            continue  # already removed due to being too close to a better peak
-
-        # keep this peak
-        kept.append(p)
-
-        # mask out all peaks within min_years
-        age_p = ages[p]
-        for j in range(i + 1, len(sorted_peaks)):
-            if used[j]:
-                continue
-            p2 = sorted_peaks[j]
-            if abs(ages[p2] - age_p) < min_distance:
-                used[j] = True
-
-    # return sorted in chronological order
-    kept = np.array(kept, dtype=int)
-    return kept[np.argsort(ages[kept])]
-
-def resample_df(df, age_col, feature_cols: list, steps: float = 1.0):
-    df = df[[age_col] + feature_cols].dropna().sort_values(by=age_col)
-
-    ages = df[age_col].values.astype(float)
-    new_ages = np.arange(np.ceil(ages.min()), np.floor(ages.max()), steps)
-
-    new_df = pd.DataFrame({age_col: new_ages})
-    for col in feature_cols:
-        new_df[col] = np.interp(new_ages, ages, df[col].values.astype(float))
-
-    return new_df
-
-PlotRunner = Callable[[str], None]
-ModelRunner = tuple[str, Callable[[list, list], tuple[PlotRunner, PlotRunner]]]
+__PlotRunner = Callable[[str], None]
+__ModelRunner = tuple[str, Callable[[list, list], tuple[__PlotRunner, __PlotRunner]]]
 
 def run_models_on_data(
-    name: str,
-    df: Callable[[], pd.DataFrame],
-    age_col: Any,
-    feature_cols: Any,
-    models: Union[ModelRunner, list[ModelRunner]],
-    transform: Callable[[pd.DataFrame, Any, Any], pd.DataFrame] = lambda df, age_col, feature_cols : df,
-    age_format: str = "Mya",
+    name: str, # Name of data
+    df: Callable[[], pd.DataFrame], # Function to load data
+    age_col: Any, # Age columns
+    feature_cols: Any, # Feature columns (Columns we will run the model on) (TODO use the correct name for these variables)
+    models: Union[__ModelRunner, list[__ModelRunner]], # Model runner(s) we will use
+    transform: Callable[[pd.DataFrame, Any, Any], pd.DataFrame] = lambda df, age_col, feature_cols : df, # Transform the input data
+    age_format: str = "Mya", # Age format to display in output
 ) -> Any:
     
+    # Clean up data frame before transforming
     def prepare_df(
         df: pd.DataFrame,
         age_col,
@@ -99,23 +58,25 @@ def run_models_on_data(
 
         return df_sel
     
-    df = prepare_df(df(), age_col, feature_cols)
+    df = df()
     df = transform(df, age_col, feature_cols)
+    df = prepare_df(df, age_col, feature_cols)
     
-    ages = df[age_col].values
-    features = df[feature_cols].values
-    
-    def run_model(runner: ModelRunner) -> Any:
+    def run_model(runner: __ModelRunner) -> Any:
         model_name, runner = runner
         
         print(f"###### Running {model_name} for {name}")
+        
         start = time.time()
-        print_results, plot_results = runner(ages, features)
-        print(f"###### {model_name} for {name} completed in {time.time() - start:.2f}s")
+        # Run the user-specified model(s) given to the parent function
+        print_results, plot_results = runner(df[age_col].values, df[feature_cols].values)
+        print(f"###### {model_name} for {name} completed in {time.time() - start:.2f}s")        
+        print()
+        
         if PRINT:
             print(f"###### Retrieved {model_name} results for {name}")
             print_results(age_format)
-        print()
+            print()
         
         if PLOT:
             plt.figure(figsize=(12,4))
@@ -129,8 +90,11 @@ def run_models_on_data(
                 os.makedirs(OUTPUT_PATH)
             plt.savefig(os.path.join(OUTPUT_PATH, f"{name} {model_name}.png"))
             plt.close()
+            
+        print()
     
     if isinstance(models, list):
-        return [run_model(m) for m in models]
+        for m in models:
+            run_model(m)
     else:
-        return run_model(models)
+        run_model(models)

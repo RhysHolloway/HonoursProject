@@ -1,16 +1,17 @@
 import os
 from typing import Any, Callable, Union
-import numpy as np
-import matplotlib.pyplot as plt
-from model import filter_points
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import numpy as np
+import matplotlib.pyplot as plt
+
 from scipy.signal import find_peaks
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, LSTM, RepeatVector, Dense, Conv1D, Dropout, MaxPooling1D, TimeDistributed
-from tensorflow.keras.callbacks import EarlyStopping    
-import tensorflow as tf
+from tensorflow.keras.callbacks import EarlyStopping
+from util import filter_points
 
 def __fixed_length_sequence(features, seq_len) -> tuple[np.array, int]:
             
@@ -32,7 +33,7 @@ def __fixed_length_sequence(features, seq_len) -> tuple[np.array, int]:
 def fixed_length_sequence(length: int):    
     return lambda features: __fixed_length_sequence(features, length)
         
-def lstm_tipping_points(
+def lstm(
     sequencer: Callable[[Any, int], tuple[np.array, int]],
     train_fraction: float,
     epochs: int,
@@ -47,7 +48,7 @@ def lstm_tipping_points(
     distance: int = 10,
 ):
     
-    def __lstm_tipping_points(
+    def run(
         ages: Any,
         features: Any,
         thresholds=threshold if isinstance(threshold, list) else [threshold],
@@ -140,10 +141,4 @@ def lstm_tipping_points(
         
         return (print_results, plot_results)
     
-    return (
-        "LSTM", 
-        lambda ages, features : __lstm_tipping_points(
-            ages,
-            features
-        ),
-    )
+    return ("LSTM", run)

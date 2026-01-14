@@ -1,12 +1,13 @@
 from typing import Any, Callable, Literal, Optional, Union
-import numpy as np
-import matplotlib.pyplot as plt
 
 import logging
 logging.getLogger("hmmlearn.base").setLevel(logging.ERROR)
-from hmmlearn.hmm import GaussianHMM
 
-from model import filter_points
+import numpy as np
+import matplotlib.pyplot as plt
+
+from hmmlearn.hmm import GaussianHMM
+from util import filter_points
 
 def fit_model(features, n_regimes, covariance_type, n_iter, min_covar, tol, random_state = None):       
     model = GaussianHMM(
@@ -69,7 +70,7 @@ def best_model_of_unknown_regimes(
     BIC_INDEX = 5
     results = []
     
-    print("### Finding best number of regimes, k ###")
+    # print("### Finding best number of regimes, k ###")
     
     # While we have less than two results or the BIC is not increasing we loop over models
     while len(results) < 2 or (results[-1][BIC_INDEX] is None or results[-2][BIC_INDEX] is None) or results[-1][BIC_INDEX] <= results[-2][BIC_INDEX]:
@@ -88,13 +89,13 @@ def best_model_of_unknown_regimes(
            
     best = min(results, key=lambda tuple: tuple[BIC_INDEX])
     
-    for k, _, _, _, aic, bic in results: 
-        best_aic = " (Lowest AIC)" if min(results, key=lambda tuple: tuple[BIC_INDEX])[0] == k else ""
-        best_bic = " (Lowest BIC)" if best[0] == k else ""
-        print(f"{k} regimes has AIC {aic} and BIC {bic}{best_aic}{best_bic}")
+    # for k, _, _, _, aic, bic in results: 
+    #     best_aic = " (Lowest AIC)" if min(results, key=lambda tuple: tuple[BIC_INDEX])[0] == k else ""
+    #     best_bic = " (Lowest BIC)" if best[0] == k else ""
+    #     print(f"{k} regimes has AIC {aic} and BIC {bic}{best_aic}{best_bic}")
     
-    c = "was unable to converge!" if not best[1].monitor_.converged else "converged."
-    print(f"### The best model has {best[0]} regimes, and {c} ###")    
+    # c = "was unable to converge!" if not best[1].monitor_.converged else "converged."
+    # print(f"### The best model has {best[0]} regimes, and {c} ###")    
             
     return best
 
@@ -118,7 +119,7 @@ def filter_accepted_ages(prev_accepted, states, ages, post, p_threshold: Optiona
 
     return accepted
 
-def hmm_tipping_points(
+def hmm(
     n_regimes: Optional[int] = None,
     covariance_type: str ="full",
     n_iter=2000,
@@ -129,13 +130,13 @@ def hmm_tipping_points(
     tol=1e-2,
 ) -> Callable[[Any, Any, bool], None]:
     
-    def __hmm_unknown_regimes(
+    def run(
         ages, 
         features,
         n_regimes: Optional[int] = n_regimes
     ):
         if n_regimes is None:
-            n_regimes, model, features, _, _, _ = best_model_of_unknown_regimes(
+            n_regimes, model, features, _, _, bic = best_model_of_unknown_regimes(
                 features = features,
                 covariance_type=covariance_type,
                 n_iter=n_iter,
@@ -152,9 +153,6 @@ def hmm_tipping_points(
                 tol=tol
             )
             
-            c = "was unable to converge!" if not model.monitor_.converged else "was able to converge."
-            print(f"### The model has BIC {bic} and {c} ###")    
-
         states = model.predict(features)
         posterior = model.predict_proba(features)    
         
@@ -170,6 +168,10 @@ def hmm_tipping_points(
         accepted = filter_accepted_ages(accepted, states, ages, posterior, p_threshold, min_state_duration)
             
         def print_results(age_format: str):  
+            
+            c = "was unable to converge!" if not model.monitor_.converged else "was able to converge."
+            print(f"The model has BIC {bic:.2f} and {c}") 
+            
             print(f"Number of regimes: {n_regimes}")
 
             print(f"Detected {len(accepted)} tipping points:")
@@ -186,7 +188,4 @@ def hmm_tipping_points(
         
         return (print_results, plot_results)
     
-    return (
-        "HMM",
-        lambda ages, features: __hmm_unknown_regimes(ages, features)
-    )
+    return ("HMM", run)
