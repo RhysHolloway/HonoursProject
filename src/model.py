@@ -2,14 +2,15 @@ from typing import Any, Callable, Union
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
-from util import get_project_path
-import os
+from util import get_project_path, join_path
 
-OUTPUT_PATH = get_project_path("../output")
+OUTPUT_PATH = get_project_path("../output/plots/")
 PRINT, PLOT = True, True
 
-__PlotRunner = Callable[[str], None]
+__PlotRunner = Callable[[str, str], None]
 __ModelRunner = tuple[str, Callable[[list, list], tuple[__PlotRunner, __PlotRunner]]]
+
+# TODO: rename models argument to something that can include both model and metric based indicator finders
 
 def run_models_on_data(
     name: str, # Name of data
@@ -75,20 +76,17 @@ def run_models_on_data(
         
         if PRINT:
             print(f"###### Retrieved {model_name} results for {name}")
-            print_results(age_format)
+            print_results(name, model_name, age_format)
             print()
         
         if PLOT:
             plt.figure(figsize=(12,4))
-            plot_results(age_format)
             plt.xlabel(f"Age ({age_format})")
+            plot_results(name, model_name, age_format)
             plt.legend()
-            plt.title(f"Tipping points for {name} using {model_name}", pad=80)
             plt.gca().invert_xaxis()
             plt.tight_layout()
-            if not os.path.exists(OUTPUT_PATH):
-                os.makedirs(OUTPUT_PATH)
-            plt.savefig(os.path.join(OUTPUT_PATH, f"{name} {model_name}.png"))
+            plt.savefig(join_path(OUTPUT_PATH, f"{name} {model_name}.png"))
             plt.close()
             
         print()

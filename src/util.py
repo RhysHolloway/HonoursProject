@@ -4,8 +4,17 @@ import sys
 import numpy as np
 import pandas as pd
 
+from os.path import join as join_path
+
 def get_project_path(path: str):
-    return os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), path)
+    # up from src/util.py
+    path = join_path(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), path)
+    dir = os.path.dirname(path)
+    if not os.path.exists(dir):
+            os.makedirs(dir)
+    return path
+
+
 
 # FUNCTIONS TO TRANSFORM INPUT DATA
 

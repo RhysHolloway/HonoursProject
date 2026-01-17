@@ -1,4 +1,5 @@
 data/
 output/
+env/
 
 src/__pycache__/

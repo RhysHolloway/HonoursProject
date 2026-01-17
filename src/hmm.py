@@ -167,7 +167,7 @@ def hmm(
         
         accepted = filter_accepted_ages(accepted, states, ages, posterior, p_threshold, min_state_duration)
             
-        def print_results(age_format: str):  
+        def print_results(_data_name: str, age_format: str):  
             
             c = "was unable to converge!" if not model.monitor_.converged else "was able to converge."
             print(f"The model has BIC {bic:.2f} and {c}") 
@@ -178,7 +178,8 @@ def hmm(
             for idx, state in accepted:
                 print(f"Age {ages[idx]:.2f}{age_format} with posterior value {posterior[idx, state]:.2f}")
 
-        def plot_results(age_format: str):
+        def plot_results(_data_name: str, age_format: str):
+            plt.title(f"Tipping points for {name} using {model_name}", pad=80)
             plt.ylabel("Posterior probability")
             for k in range(posterior.shape[1]):
                 plt.plot(ages, posterior[:, k], label=f"P(state={k})")

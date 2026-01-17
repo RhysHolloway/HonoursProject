@@ -7,138 +7,132 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from scipy.signal import find_peaks
-from sklearn.preprocessing import StandardScaler
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, LSTM, RepeatVector, Dense, Conv1D, Dropout, MaxPooling1D, TimeDistributed
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Input, LSTM, Dense, Conv1D, Dropout, MaxPooling1D
 from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.losses import SparseCategoricalCrossentropy
+from tensorflow.keras.optimizers import Adam, Optimizer
 from util import filter_points
 
-def __fixed_length_sequence(features, seq_len) -> tuple[np.array, int]:
-            
-    # === Scale features ===
-    features_scaled = StandardScaler().fit_transform(features)
+# def train_lstm_from_data(
+#     data,
+#     seq_len: int,
+#     train: Union[int, float],
+#     epochs: int,
+#     patience: int = 30,
+#     batch_size: int = 32,
+#     kernel_initializer: str = 'lecun_normal',
+#     optimizer: Optimizer = Adam(learning_rate = 0.0005),
+# ):
 
-    # === Make sequences ===
-    if len(features_scaled) < seq_len + 10:
-        raise ValueError(
-            f"Time series too short for seq_len={seq_len}. "
-            f"Need at least seq_len+10 points."
-        )
+#     if float(train) <= 0.0:
+#         raise ValueError("Negative or zero training value provided!")
     
-    X = []
-    for i in range(len(features_scaled) - seq_len + 1):
-        X.append(features_scaled[i:i + seq_len])
-    return (np.array(X), seq_len)  # (n_seq, seq_len, n_features)
+#     n_train: int = int(min(train, 1.0) * len(ages)) if isinstance(train, float) else max(int(train), len(ages))
 
-def fixed_length_sequence(length: int):    
-    return lambda features: __fixed_length_sequence(features, length)
-        
+#     Y_train, X_train = ages[:n_train], seq_features[:n_train].reshape(n_train, features.shape[1], 1)
+    
+#     Y_val, X_val = ages[n_train:], seq_features[n_train:].reshape(-1, features.shape[1], 1)
+    
+#     model = Sequential([
+#         Input(shape=(features.shape[1], 1)),
+#         Conv1D(
+#             filters=50, 
+#             kernel_size=12,
+#             padding="same",
+#             activation="relu",
+#             kernel_initializer=kernel_initializer,
+#         ),
+#         Dropout(0.1),
+#         MaxPooling1D(pool_size = 2),
+#         LSTM(50, return_sequences=True, kernel_initializer = kernel_initializer),
+#         Dropout(0.1),
+#         LSTM(10, kernel_initializer = kernel_initializer),
+#         Dense(4, activation='softmax', kernel_initializer = kernel_initializer)
+#     ])
+
+#     model.compile(
+#         loss=SparseCategoricalCrossentropy(), 
+#         optimizer=optimizer, 
+#         metrics=['accuracy']
+#     )
+    
+#     history = model.fit(
+#         x=X_train,
+#         y=Y_train,
+#         epochs=epochs,
+#         batch_size=batch_size,
+#         callbacks=[EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)],
+#         validation_data=(X_val, Y_val),
+#         verbose=True,
+#     )
+    
+#     return (model, history)
+
 def lstm(
-    sequencer: Callable[[Any, int], tuple[np.array, int]],
-    train_fraction: float,
-    epochs: int,
-    patience: int = 30,
-    batch_size: int = 32,
-    latent_dim: int = 16,
-    kernel_size: int = 12,
-    conv_filters: int = 50,
-    threshold: Union[Union[int, float], list[Union[int, float]]] = [95, 99],
+    model,
+    threshold: Union[float, list[float]] = [0.95, 0.99],
     prominence: float = 0.05,
-    smoothing_window: int = 1,
     distance: int = 10,
 ):
     
     def run(
         ages: Any,
         features: Any,
-        thresholds=threshold if isinstance(threshold, list) else [threshold],
+        thresholds: float = threshold if isinstance(threshold, list) else [threshold],
     ):
+    
+        seq_features = np.array(features) / np.mean(np.abs(features))
+
+        predictions = model.predict(seq_features, verbose=False)
+
+        height = np.percentile(predictions, min(thresholds))
         
-        X_all, seq_len = sequencer(features) 
-        seq_ages = ages[seq_len - 1:]
-
-        n_train = int(train_fraction * len(X_all))
-        X_train = X_all[:n_train]
-
-        print(f"Total sequences: {len(X_all)}, training on first {n_train} sequences with length {seq_len}")
-        
-        inputs = Input(shape=(seq_len, features.shape[1]))
-        layers = Conv1D(filters=conv_filters, kernel_size=kernel_size,padding="same",activation="relu")(inputs)
-        layers = Dropout(0.1)(layers)
-        layers = MaxPooling1D()(layers)
-        layers = LSTM(latent_dim)(layers)
-        layers = RepeatVector(seq_len)(layers)
-        layers = LSTM(latent_dim, return_sequences=True, dropout=0.1)(layers)
-        # layers = Dropout(0.1)(layers)
-        layers = TimeDistributed(Dense(features.shape[1]))(layers)
-
-        model = Model(inputs, layers)
-        model.compile(optimizer="adam", loss="mse")
-
-        # if verbose:
-        #     model.summary()
-
-        history = model.fit(
-            X_train,
-            X_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_split=0.2,
-            callbacks=[EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)],
-            verbose=False,
-        )
-
-        # === Reconstruction error for all sequences ===
-        X_pred = model.predict(
-            X_all, 
-            verbose=False
-        )
-        # mse over time and features
-        mse = np.mean((X_all - X_pred) ** 2, axis=(1, 2))  # shape (n_seq,)
-
-        # === Smooth the error to get a tipping-point score ===
-        if smoothing_window > 1:
-            kernel = np.ones(smoothing_window) / smoothing_window
-            mse = np.convolve(mse, kernel, mode="same")
-
-        height = np.percentile(mse[:n_train], min(thresholds))
-
-        
+        # Find peaks of non-neutral states (the bifurcations)
         peaks, _ = find_peaks(
-            mse,
+            predictions[:-1],
             height=height,
             prominence=prominence
         )
         
+        # Filter by distance
         peaks = filter_points(
             points=peaks, 
-            scores=mse[peaks], 
-            ages=seq_ages, 
+            scores=predictions[peaks], 
+            ages=ages, 
             min_distance=distance
         )
         
         values = f"Sequence Length: {seq_len}, Train Fraction: {train_fraction}, Epochs: {len(history.history['loss'])}/{epochs}, Training Loss: {history.history['loss'][-1]:.3f}, Valuation loss: {history.history['val_loss'][-1]:.3f}"
 
-        def print_results(age_format: str):
+        def print_results(_data_name: str, age_format: str):
+            print(f"Total sequences: {len(ages)}, trained on first {n_train} sequences with length {seq_len}")
             print(values.replace(", ", "\n"))
             for threshold in thresholds:
                 print(f"Threshold: {threshold}th percentile -> {np.percentile(mse[:n_train], threshold):.4f}")
 
             print(f"Detected {len(peaks)} tipping points:")
             for point in peaks:
-                print(f"Age {seq_ages[point]:.0f}{age_format} with score {mse[point]:.2f}")
+                print(f"Age {ages[point]:.0f}{age_format} with score {mse[point]:.2f}")
             
-        def plot_results(age_format: str):
-            plt.plot(seq_ages, mse)
-            plt.ylabel(f"Tipping score")
-            plt.figtext(0.5, 0.01, values, wrap=True, horizontalalignment='center', fontsize=12)
+        def plot_results(data_name: str, age_format: str):
+                   
+            # CNN-LSTM model plot results
+                       
+            fig, axs = plt.subplot(1, 1, figsize=(8,5), sharex = True)      
+            fig.suptitle("CNN-LSTM predictions")
+            fig.plot(ages, predictions[:-1])
+            fig.legend(["Fold", "Hopf", "Transcritical"])            
+            fig.ylabel("Tipping probability")
             for threshold in thresholds:
-                plt.axhline(np.percentile(mse[:n_train], threshold), linestyle="--", label=f"{threshold}th percentile threshold")
-
-            plt.scatter(seq_ages[peaks], mse[peaks], color="red", label="Tipping points")
-            for i, peak in enumerate(seq_ages[peaks]):
-                plt.annotate(peak, (peak, mse[peaks][i]))
-        
+                fig.axhline(threshold, linestyle="--")
+            fig.scatter(ages[peaks], predictions[peaks], color="red", label="Tipping points")
+            for i, peak in enumerate(ages[peaks]):
+                fig.annotate(peak, (peak, predictions[peaks][i]))
+            
+            textfig, _ = plt.subplot(2, 1)
+            textfig.text(0.5, 0.01, values, wrap=True, horizontalalignment='center', fontsize=12)  
+            
         return (print_results, plot_results)
     
     return ("LSTM", run)
