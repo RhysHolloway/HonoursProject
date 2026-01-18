@@ -1,10 +1,9 @@
 from util import resample_df, get_project_path, pd
 
-from model import run_models_on_data
-from lstm import lstm
-from hmm import hmm
+from runner import run_analyses_on_data
+from models import dlm, hmm, lstm, metrics
 
-data_path = lambda file: get_project_path(f"../data/{file}")
+data_path = lambda file: get_project_path(f"data/{file}")
  
 # run_models_on_data(
 #     name="Lisiecki (2005)",
@@ -31,30 +30,31 @@ data_path = lambda file: get_project_path(f"../data/{file}")
 #     ],
 # )
 
-run_models_on_data(
+run_analyses_on_data(
     name="Scotese et al. (2021)",
     df=lambda: pd.read_excel(data_path("Part 4. Phanerozoic_Paleotemperature_Summaryv4.xlsx"), sheet_name="Master", header=[0,1]),
     age_col=("Age", 'Unnamed: 0_level_1'),
     feature_cols=[
         ("Average", "Tropical"),
-        ("Average", "Deep Ocean"), 
-        ("Average", "∆T trop"),
-        ("North", "Polar >67˚N"), 
-        ("South", "Polar <67˚S")
+        # ("Average", "Deep Ocean"), 
+        # ("Average", "∆T trop"),
+        # ("North", "Polar >67˚N"), 
+        # ("South", "Polar <67˚S")
     ],
-    models = [
+    analyses = [
+        dlm(),
         # hmm(
         #     min_covar=1e-4,
         #     p_threshold=0.7,
         #     min_state_duration=30,
         #     min_duration_between_switches=50,
         # ),
-        lstm(
-            seq_len=16,
-            train=0.4,
-            threshold=[.925, .95, .99],
-            epochs=300
-        ),
+        # lstm(
+        #     seq_len=16,
+        #     train=0.4,
+        #     threshold=[.925, .95, .99],
+        #     epochs=300
+        # ),
     ]
 )
     

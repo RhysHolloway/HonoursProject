@@ -4,20 +4,17 @@ import matplotlib.pyplot as plt
 import time
 from util import get_project_path, join_path
 
-OUTPUT_PATH = get_project_path("../output/plots/")
+OUTPUT_PATH = get_project_path("output/plots/")
 PRINT, PLOT = True, True
 
-__PlotRunner = Callable[[str, str], None]
-__ModelRunner = tuple[str, Callable[[list, list], tuple[__PlotRunner, __PlotRunner]]]
+__Runner = tuple[str, Callable[[list, list], tuple[Callable[[str, str], None], Callable[[plt.Figure, str, str], None]]]]
 
-# TODO: rename models argument to something that can include both model and metric based indicator finders
-
-def run_models_on_data(
-    name: str, # Name of data
-    df: Callable[[], pd.DataFrame], # Function to load data
+def run_analyses_on_data(
+    name: str, # Name of dataset
+    df: Callable[[], pd.DataFrame], # Function to load dataset
     age_col: Any, # Age columns
-    feature_cols: Any, # Feature columns (Columns we will run the model on) (TODO use the correct name for these variables)
-    models: Union[__ModelRunner, list[__ModelRunner]], # Model runner(s) we will use
+    feature_cols: Any, # Feature columns (Columns we will run the model on)
+    analyses: Union[__Runner, list[__Runner]], # Model runner(s) we will use
     transform: Callable[[pd.DataFrame, Any, Any], pd.DataFrame] = lambda df, age_col, feature_cols : df, # Transform the input data
     age_format: str = "Mya", # Age format to display in output
 ) -> Any:
@@ -63,36 +60,33 @@ def run_models_on_data(
     df = transform(df, age_col, feature_cols)
     df = prepare_df(df, age_col, feature_cols)
     
-    def run_model(runner: __ModelRunner) -> Any:
-        model_name, runner = runner
+    def run_analysis(runner: __Runner) -> Any:
+        runner_name, runner = runner
+        data_name = name
         
-        print(f"###### Running {model_name} for {name}")
+        print(f"###### Running {runner_name} for {data_name}")
         
         start = time.time()
         # Run the user-specified model(s) given to the parent function
         print_results, plot_results = runner(df[age_col].values, df[feature_cols].values)
-        print(f"###### {model_name} for {name} completed in {time.time() - start:.2f}s")        
+        print(f"###### {runner_name} for {data_name} completed in {time.time() - start:.2f}s")        
         print()
         
         if PRINT:
-            print(f"###### Retrieved {model_name} results for {name}")
-            print_results(name, model_name, age_format)
+            print(f"###### Retrieved {runner_name} results for {data_name}")
+            print_results(data_name, age_format)
             print()
         
         if PLOT:
-            plt.figure(figsize=(12,4))
-            plt.xlabel(f"Age ({age_format})")
-            plot_results(name, model_name, age_format)
-            plt.legend()
-            plt.gca().invert_xaxis()
-            plt.tight_layout()
-            plt.savefig(join_path(OUTPUT_PATH, f"{name} {model_name}.png"))
-            plt.close()
+            fig = plt.figure(figsize=(12,4))
+            fig.tight_layout()
+            plot_results(fig, data_name, age_format)
+            fig.savefig(join_path(OUTPUT_PATH, f"{data_name} {runner_name}.png"))
             
         print()
     
-    if isinstance(models, list):
-        for m in models:
-            run_model(m)
+    if isinstance(analyses, list):
+        for a in analyses:
+            run_analysis(a)
     else:
-        run_model(models)
+        run_analysis(analyses)

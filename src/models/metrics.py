@@ -17,7 +17,7 @@ def metrics(
         def print_results(data_name: str, age_format: str):
             pass
         
-        def plot_results(data_name: str, age_format: str):
+        def plot_results(figure, data_name: str, age_format: str):
                 
             # Variance plot
             

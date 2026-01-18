@@ -1,18 +1,19 @@
-import os
 from typing import Any, Callable, Union
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from scipy.signal import find_peaks
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Input, LSTM, Dense, Conv1D, Dropout, MaxPooling1D
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.losses import SparseCategoricalCrossentropy
-from tensorflow.keras.optimizers import Adam, Optimizer
 from util import filter_points
+from tensorflow.keras.models import load_model
+# import ewstools
+
+# from tensorflow.keras.models import Sequential
+# from tensorflow.keras.layers import Input, LSTM, Dense, Conv1D, Dropout, MaxPooling1D
+# from tensorflow.keras.callbacks import EarlyStopping
+# from tensorflow.keras.losses import SparseCategoricalCrossentropy
+# from tensorflow.keras.optimizers import Adam, Optimizer
 
 # def train_lstm_from_data(
 #     data,
@@ -69,8 +70,11 @@ from util import filter_points
     
 #     return (model, history)
 
+model = None
+
+# Make sure to do linear interpolation before using
 def lstm(
-    model,
+    # model,
     threshold: Union[float, list[float]] = [0.95, 0.99],
     prominence: float = 0.05,
     distance: int = 10,
@@ -81,6 +85,9 @@ def lstm(
         features: Any,
         thresholds: float = threshold if isinstance(threshold, list) else [threshold],
     ):
+        
+        if model is None:
+            model = load_model(get_project_path("env/deep-early-warnings-pnas/dl_train/best_models_tf215/len500/best_model_1_1_len500.keras"))
     
         seq_features = np.array(features) / np.mean(np.abs(features))
 
@@ -115,23 +122,24 @@ def lstm(
             for point in peaks:
                 print(f"Age {ages[point]:.0f}{age_format} with score {mse[point]:.2f}")
             
-        def plot_results(data_name: str, age_format: str):
+        def plot_results(parent, data_name: str, age_format: str):
                    
             # CNN-LSTM model plot results
                        
-            fig, axs = plt.subplot(1, 1, figsize=(8,5), sharex = True)      
+            axs = parent.subplot(1, 2, figsize=(8,5), sharex = True)
+            axs, textaxs = axs[1, 1], axs[1, 2]
+            axs.invert_xaxis()
             fig.suptitle("CNN-LSTM predictions")
-            fig.plot(ages, predictions[:-1])
+            axs.plot(ages, predictions[:-1])
             fig.legend(["Fold", "Hopf", "Transcritical"])            
             fig.ylabel("Tipping probability")
             for threshold in thresholds:
-                fig.axhline(threshold, linestyle="--")
-            fig.scatter(ages[peaks], predictions[peaks], color="red", label="Tipping points")
+                axs.axhline(threshold, linestyle="--")
+            axs.scatter(ages[peaks], predictions[peaks], color="red", label="Tipping points")
             for i, peak in enumerate(ages[peaks]):
-                fig.annotate(peak, (peak, predictions[peaks][i]))
-            
-            textfig, _ = plt.subplot(2, 1)
-            textfig.text(0.5, 0.01, values, wrap=True, horizontalalignment='center', fontsize=12)  
+                axs.annotate(peak, (peak, predictions[peaks][i]))
+
+            textaxs[1].text(0.5, 0.01, values, wrap=True, horizontalalignment='center', fontsize=12)
             
         return (print_results, plot_results)
     

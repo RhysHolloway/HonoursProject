@@ -2,4 +2,4 @@ data/
 output/
 env/
 
-src/__pycache__/
+**/__pycache__/

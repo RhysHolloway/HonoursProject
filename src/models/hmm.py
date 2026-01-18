@@ -178,14 +178,16 @@ def hmm(
             for idx, state in accepted:
                 print(f"Age {ages[idx]:.2f}{age_format} with posterior value {posterior[idx, state]:.2f}")
 
-        def plot_results(_data_name: str, age_format: str):
-            plt.title(f"Tipping points for {name} using {model_name}", pad=80)
-            plt.ylabel("Posterior probability")
+        def plot_results(parent, data_name: str, age_format: str):
+            axs = parent.add_subplot()
+            axs.set_title(f"HMM {data_name}")
+            axs.set_ylabel("Posterior probability")
+            axs.set_xlabel(f"Age ({age_format})")
             for k in range(posterior.shape[1]):
-                plt.plot(ages, posterior[:, k], label=f"P(state={k})")
+                axs.plot(ages, posterior[:, k], label=f"P(state={k})")
             for a, state in accepted:
-                plt.axvline(ages[a], linestyle="--", alpha=0.7)
-                plt.text(ages[a], 1.1, f"{round(ages[a])}{age_format} ({posterior[a, state]:.2f})", color='black', ha='center', va='bottom', rotation=90)
+                axs.axvline(ages[a], linestyle="--", alpha=0.7)
+                axs.text(ages[a], 1.1, f"{round(ages[a])}{age_format} ({posterior[a, state]:.2f})", color='black', ha='center', va='bottom', rotation=90)
         
         return (print_results, plot_results)
     

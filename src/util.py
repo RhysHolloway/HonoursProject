@@ -1,11 +1,14 @@
 from typing import Any, Callable, Union
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import sys
 import numpy as np
+np.random.seed(0)  # Set seed for reproducibility
 import pandas as pd
 
 from os.path import join as join_path
 
+# Get path above src/ folder
 def get_project_path(path: str):
     # up from src/util.py
     path = join_path(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), path)

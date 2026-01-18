@@ -1,21 +1,45 @@
-from util import filter_points, get_project_path, join_path
+from util import get_project_path, join_path
 
 import os
 import subprocess
 from concurrent.futures import ProcessPoolExecutor
 import re
 import fileinput
+import atexit
+import shutil
+import threading
 
 ROOT_PATH = get_project_path("")
 
+# Kill all subprocesses on Ctrl-C exit
+
+lock = threading.Lock()
+processes = set()
+
+def __kill():
+    with lock:
+        for p in processes:
+            p.kill()
+
+atexit.register(__kill)
+
 def __train(batch: int, seq_len: int) -> int:
-    return subprocess.call(["sh", join_path(ROOT_PATH, "src/train.sh"), str(batch), str(seq_len)], stdout=subprocess.DEVNULL)
+    p = subprocess.Popen(["sh", join_path(ROOT_PATH, "src/train.sh"), str(batch), str(seq_len)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with lock:
+        processes.add(p)
+    code = p.wait()
+    with lock:
+        processes.remove(p)
+    return code
 
 # TODO Test w/ slurm library
-def generate_training_data(batches: int, seq_len: int, bif_max: int = 1000):
+def generate_training_data(batches: int, seq_len: int, bif_max: int = 5):
     print(ROOT_PATH)
     if not os.path.exists(join_path(ROOT_PATH, "env/")):
         raise RuntimeError("Training environment has not been setup! Please run ./setup.sh or ./source.sh")
+    
+    # Remove previous build
+    shutil.rmtree(join_path(ROOT_PATH, "env/deep-early-warnings-pnas/training_data/output/"), ignore_errors=True)
     
     # Change the bif_max in the file because it is hardcoded
     with fileinput.input(join_path(ROOT_PATH, "env/deep-early-warnings-pnas/training_data/run_single_batch.sh"), inplace=True) as lines:
