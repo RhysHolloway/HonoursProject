@@ -1,7 +1,7 @@
+from models import *
+from wrapper import Dataset
+print("TEst")
 from util import resample_df, get_project_path, pd
-
-from runner import run_analyses_on_data
-from models import dlm, hmm, lstm, metrics
 
 data_path = lambda file: get_project_path(f"data/{file}")
  
@@ -30,19 +30,26 @@ data_path = lambda file: get_project_path(f"data/{file}")
 #     ],
 # )
 
-run_analyses_on_data(
+Scotese = Dataset(
     name="Scotese et al. (2021)",
     df=lambda: pd.read_excel(data_path("Part 4. Phanerozoic_Paleotemperature_Summaryv4.xlsx"), sheet_name="Master", header=[0,1]),
     age_col=("Age", 'Unnamed: 0_level_1'),
     feature_cols=[
         ("Average", "Tropical"),
-        # ("Average", "Deep Ocean"), 
-        # ("Average", "∆T trop"),
-        # ("North", "Polar >67˚N"), 
-        # ("South", "Polar <67˚S")
+        ("Average", "Deep Ocean"), 
+        ("Average", "∆T trop"),
+        ("North", "Polar >67˚N"), 
+        ("South", "Polar <67˚S")
     ],
-    analyses = [
-        dlm(),
+    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, 1),
+    age_scale=1000000,
+)
+
+# DLM = DLM()
+LSTM().run([Scotese])
+
+# HMM().run([Scotese])
+
         # hmm(
         #     min_covar=1e-4,
         #     p_threshold=0.7,
@@ -55,8 +62,6 @@ run_analyses_on_data(
         #     threshold=[.925, .95, .99],
         #     epochs=300
         # ),
-    ]
-)
     
 # run_models_on_data(
 #     name="Judd et. al. (2024)",

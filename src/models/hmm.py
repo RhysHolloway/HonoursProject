@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 
 from hmmlearn.hmm import GaussianHMM
 from util import filter_points
+from wrapper import Model, Dataset
 
 def fit_model(features, n_regimes, covariance_type, n_iter, min_covar, tol, random_state = None):       
     model = GaussianHMM(
@@ -119,22 +120,27 @@ def filter_accepted_ages(prev_accepted, states, ages, post, p_threshold: Optiona
 
     return accepted
 
-def hmm(
-    n_regimes: Optional[int] = None,
-    covariance_type: str ="full",
-    n_iter=2000,
-    min_duration_between_switches=20.0,
-    min_state_duration=10.0,
-    p_threshold: Optional[float] = 0.99,
-    min_covar=1e-3,
-    tol=1e-2,
-) -> Callable[[Any, Any, bool], None]:
+class HMM(Model):
     
-    def run(
-        ages, 
-        features,
-        n_regimes: Optional[int] = n_regimes
+    def __init__(self):
+        super().__init__("HMM")
+    
+    def runner(
+        self,
+        data: list[Dataset],
+        n_regimes: Optional[int] = None,
+        covariance_type: str ="full",
+        n_iter=2000,
+        min_duration_between_switches=20.0,
+        min_state_duration=10.0,
+        p_threshold: Optional[float] = 0.99,
+        min_covar=1e-3,
+        tol=1e-2,
     ):
+        
+        ages = data[0].ages()
+        features = data[0].features()
+        
         if n_regimes is None:
             n_regimes, model, features, _, _, bic = best_model_of_unknown_regimes(
                 features = features,
@@ -167,7 +173,7 @@ def hmm(
         
         accepted = filter_accepted_ages(accepted, states, ages, posterior, p_threshold, min_state_duration)
             
-        def print_results(_data_name: str, age_format: str):  
+        def print_results():  
             
             c = "was unable to converge!" if not model.monitor_.converged else "was able to converge."
             print(f"The model has BIC {bic:.2f} and {c}") 
@@ -178,7 +184,7 @@ def hmm(
             for idx, state in accepted:
                 print(f"Age {ages[idx]:.2f}{age_format} with posterior value {posterior[idx, state]:.2f}")
 
-        def plot_results(parent, data_name: str, age_format: str):
+        def plot_results(parent):
             axs = parent.add_subplot()
             axs.set_title(f"HMM {data_name}")
             axs.set_ylabel("Posterior probability")
@@ -190,5 +196,3 @@ def hmm(
                 axs.text(ages[a], 1.1, f"{round(ages[a])}{age_format} ({posterior[a, state]:.2f})", color='black', ha='center', va='bottom', rotation=90)
         
         return (print_results, plot_results)
-    
-    return ("HMM", run)

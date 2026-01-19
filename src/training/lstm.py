@@ -1,3 +1,7 @@
+from multiprocessing import freeze_support
+import sys
+from os import path
+sys.path.append( path.dirname( path.dirname( path.abspath(__file__) ) ) )
 from util import get_project_path, join_path
 
 import os
@@ -15,7 +19,6 @@ ROOT_PATH = get_project_path("")
 
 lock = threading.Lock()
 processes = set()
-
 def __kill():
     with lock:
         for p in processes:
@@ -23,8 +26,11 @@ def __kill():
 
 atexit.register(__kill)
 
-def __train(batch: int, seq_len: int) -> int:
-    p = subprocess.Popen(["sh", join_path(ROOT_PATH, "src/train.sh"), str(batch), str(seq_len)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def __train(batch: int, seq_len: int) -> int: 
+    p = subprocess.Popen(["sh", "-c", f"source ../../../create-env.sh && source ./run_single_batch.sh {batch} {seq_len}"], 
+        stdout=subprocess.DEVNULL, 
+        # stderr=subprocess.DEVNULL
+    )
     with lock:
         processes.add(p)
     code = p.wait()
@@ -47,24 +53,29 @@ def generate_training_data(batches: int, seq_len: int, bif_max: int = 5):
             print(re.sub(r'^bif_max=[0-9]+', f"bif_max={bif_max}", line.rstrip())) # Printing outputs to the file
     
     print(f"Creating {batches} batches... (output hidden)")
+    os.chdir(join_path(ROOT_PATH, "env/deep-early-warnings-pnas/training_data/"))
     with ProcessPoolExecutor() as p:
         all(output == 0 for output in p.map(__train, range(1,1+batches), [seq_len] * batches))
         
-    os.chdir(join_path(ROOT_PATH, "env/deep-early-warnings-pnas/training_data/"))
     assert subprocess.call(["sh", "combine_batches.sh", str(batches), str(seq_len)]) == 0
 
 # Only generates one model. The Bury paper uses the average given by 20 models in its results.
 def generate_model(seq_len: int):
     
-    lib_size = len(os.listdir(join_path(ROOT_PATH, "env/deep-early-warnings-pnas/training_data/output/combined/output_resids/")))
+    lib_size = len(os.listdir(join_path(ROOT_PATH, f"env/deep-early-warnings-pnas/training_data/output/ts_{seq_len}/combined/output_resids/")))
     
     # Change the seq_len in the file because it is hardcoded
     with fileinput.input(join_path(ROOT_PATH, "env/deep-early-warnings-pnas/dl_train/DL_training.py"), inplace=True) as lines:
         for line in lines:
-            print(re.sub(r'^\(lib_size, ts_len\) = \([0-9]+, [0-9]+\)$', f"(lib_size, ts_len) = ({lib_size}, {seq_len})", line.rstrip())) # Printing outputs to the file
+            print(re.sub(r'^\(lib_size, ts_len\) = \([0-9]+, [0-9]+\)', f"(lib_size, ts_len) = ({lib_size}, {seq_len})", line.rstrip())) # Printing outputs to the file
     
     os.chdir(join_path(ROOT_PATH, "env/deep-early-warnings-pnas/dl_train/"))
     subprocess.call(["python", "DL_training.py", "1", "1"])
 
-generate_training_data(10, 100)
-generate_model(100)
+if __name__ == '__main__':
+    freeze_support()
+
+    # Kill all subprocesses on Ctrl-C exit
+
+    generate_training_data(10, 1500)
+    generate_model(1500)
