@@ -1,5 +1,5 @@
 import os
-from typing import Union
+from typing import Union, Callable, Any
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -9,13 +9,6 @@ from util import filter_points, get_project_path, resample_df
 from wrapper import Dataset, Model
 from tensorflow.keras.models import load_model
 import ewstools
-# import ewstools
-
-# from tensorflow.keras.models import Sequential
-# from tensorflow.keras.layers import Input, LSTM, Dense, Conv1D, Dropout, MaxPooling1D
-# from tensorflow.keras.callbacks import EarlyStopping
-# from tensorflow.keras.losses import SparseCategoricalCrossentropy
-# from tensorflow.keras.optimizers import Adam, Optimizer
 
 # def train_lstm_from_data(
 #     data,
@@ -71,14 +64,35 @@ import ewstools
 #     )
 
 # Make sure to do linear interpolation before using
-class LSTM(Model):
+class BuryLSTM:
     
     def __init__(self):
-        super().__init__("CNN-LSTM")
-        
         root_path = get_project_path("env/deep-early-warnings-pnas/dl_train/best_models_tf215/")
         self.__500models = [load_model(root_path + "len500/" + name) for name in os.listdir(root_path + "len500/") if name[-6:] == ".keras"]
         self.__1500models = [load_model(root_path + "len1500/" + name) for name in os.listdir(root_path + "len1500/") if name[-6:] == ".keras"]
+        
+    def with_args(
+        thresholds: list[float] = [0.9],
+        prominence: float = 0.05,
+        distance: int = 10,
+    ):
+        return LSTMWithModel(lambda series: self.__1500models if len(series) > 500 else self.__500models)
+    
+class LSTMWithModel(Model):
+        
+    def __init__(
+        self,
+        get_models_for_series: Callable[[Any], list],
+        thresholds: list[float],
+        prominence: float,
+        distance: int,
+        ):
+        super().__init__("CNN-LSTM")
+        
+        self.get_models_for_series = get_models_for_series
+        self.thresholds = thresholds
+        self.prominence = prominence
+        self.distance = distance
         
     def __compute_ews(dataset: Dataset, dic_bandwith: dict) -> list[pd.DataFrame]:
 
@@ -124,7 +138,7 @@ class LSTM(Model):
         # # Export
         return df_ews
         
-    def __predict(self, dataset: Dataset):
+    def __classify(self, dataset: Dataset):
         
         df_ews_forced = self.__compute_ews(dataset)
         
@@ -135,7 +149,7 @@ class LSTM(Model):
         dt = series.index[1] - series.index[0]
         inc = dt * 10
         
-        classifier_list = self.__1500models if len(series) > 500 else self.__500models
+        classifier_list = self.get_models_for_series(series)
         
         for i, classifier in enumerate(classifier_list):
             ts.apply_classifier_inc(classifier, inc=inc, verbose=1, name=str(i))
@@ -145,69 +159,70 @@ class LSTM(Model):
         dl_preds_mean.columns = ["fold_prob", "hopf_prob", "branch_prob", "null_prob"]
         dl_preds_mean.index.name = "Time"
         
-        return dl_preds_mean
-
+        def find_peaks_in_col(col, ages):
+        
+            height = np.percentile(col, min(self.thresholds))
+            
+            # Find and filter by prominence
+            peaks, _ = find_peaks(
+                col,
+                height=height,
+                prominence=self.prominence
+            )
+            
+            # Filter by distance
+            peaks = filter_points(
+                points=peaks, 
+                scores=col[peaks], 
+                ages=ages, 
+                min_distance=self.distance
+            )
+            
+            return peaks
+        
+        points = [find_peaks_in_col(col, ts.dl_preds["Time"]) for col in ts.dl_preds[[0,1,2]]]
+        
+        return (
+            dl_preds, dl_preds_mean, points
+        )
+        
+        
+    TITLES = ["Fold", "Hopf", "Transcritical", "Mean Probability"]
 
     def runner(
         self,
         datasets: list[Dataset],
-        # threshold: Union[float, list[float]] = [0.95, 0.99],
-        prominence: float = 0.05,
-        distance: int = 10,
-    ):
-        # thresholds: float = threshold if isinstance(threshold, list) else [threshold]
+    ):        
+        results = [(dataset, self.__classify(dataset)) for dataset in datasets]
+
+        def print_single(tup: tuple):
+            dataset, (preds, means, points) = tup
+
+            for i, points in enumerate(points):
+                print(f"Detected {len(points)} {self.TITLES[i]} points:")
+                for point in points:
+                    print(f"{preds[point][i]} at {preds[point]} {dataset.age_format}")
+            
+        def plot_single(tup: tuple):
+            dataset, (preds, means, points) = tup
+                    
+            fig = pyplot.figure(4, 12, sharex = True)
+            fig.suptitle(f"Bifurcation classifications on {dataset.name}")
+            subplots = fig.subplots(nrows=4, ncols=1, sharex=True)
+            for i, ax in enumerate(subplots):
+                ax.invert_xaxis()
+                ax.set_title(self.TITLES[i])
+                ax.set_xlabel(f"Age ({dataset.age_format})")
+                ax.set_ylabel("Probability")
+                ax.plot(preds[i] if i != 3 else means, preds["Time"])
+                if i != 3:
+                    ax.scatter(points, preds["Time"])
+                
+                for threshold in thresholds:
+                    ax.axhline(threshold, linestyle="--")
+
+            return fig
+            
+        return (lambda: map(print_single, results), lambda: list(map(plot_single, results)))
+
     
-        predictions = [self.__predict(dataset) for dataset in datasets]
-
-            # height = np.percentile(predictions, min(thresholds))
-            
-            # Find peaks of non-neutral states (the bifurcations)
-            # peaks, _ = find_peaks(
-            #     predictions[:-1],
-            #     height=height,
-            #     prominence=prominence
-            # )
-            
-            # # Filter by distance
-            # peaks = filter_points(
-            #     points=peaks, 
-            #     scores=predictions[peaks], 
-            #     ages=ages, 
-            #     min_distance=distance
-            # )
-        
-        # values = f"Sequence Length: {seq_len}, Train Fraction: {train_fraction}, Epochs: {len(history.history['loss'])}/{epochs}, Training Loss: {history.history['loss'][-1]:.3f}, Valuation loss: {history.history['val_loss'][-1]:.3f}"
-
-        def print_results():
-            # print(f"Total sequences: {len(ages)}, trained on first {n_train} sequences with length {seq_len}")
-            # print(values.replace(", ", "\n"))
-            # for threshold in thresholds:
-            #     print(f"Threshold: {threshold}th percentile -> {np.percentile(mse[:n_train], threshold):.4f}")
-
-            # print(f"Detected {len(peaks)} tipping points:")
-            # for point in peaks:
-            #     print(f"Age {ages[point]:.0f}{age_format} with score {mse[point]:.2f}")
-            pass
-            
-        def plot_results(parent):
-                   
-            # CNN-LSTM model plot results
-                       
-            main_axs: plt.Axes = parent.subplot(len(predictions), 2, sharex = True)
-            for i in range(len(predictions)):
-                axs: plt.Axes = main_axs[i, 1]
-                axs.invert_xaxis()
-                axs.set_title(f"CNN-LSTM predictions on {datasets[i].name}")
-                p = predictions[i]
-                axs.plot(datasets[i].ages(), p[:-1])
-                axs.legend(["Fold", "Hopf", "Transcritical"])            
-                axs.set_ylabel("Tipping probability")
-                # for threshold in thresholds:
-                #     axs.axhline(threshold, linestyle="--")
-                # axs.scatter(ages[peaks], predictions[peaks], color="red", label="Tipping points")
-                # for i, peak in enumerate(ages[peaks]):
-                #     axs.annotate(peak, (peak, predictions[peaks][i]))
-
-                # textaxs[1].text(0.5, 0.01, values, wrap=True, horizontalalignment='center', fontsize=12)
-            
-        return (print_results, plot_results)

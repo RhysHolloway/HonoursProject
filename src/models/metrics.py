@@ -1,37 +1,79 @@
-def metrics(
-    seq_len: int,
-    autocorrelation = True,
-):
+import matplotlib
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+import numpy as np
+import pandas as pd
+from wrapper import Dataset, Model
+
+
+class Metrics(Model):
     
-    def run(
-        ages, 
-        features,
+    def __init__(
+        self, 
+        seq_len: int,
+        variance: bool = True,
+        autocorrelation: bool = True,
+        ):
+        super().__init__("Metric-based analysis")
+        
+        self.seq_len = seq_len
+        self.variance = variance
+        self.autocorrelation = autocorrelation
+    
+    def runner(
+        self,
+        datasets: list[Dataset],
     ):
-    
-        seq_features = np.array(features) / np.mean(np.abs(features))
         
-        variance = np.array([np.var(seq_features[i-seq_len:i]) for i in range(seq_len, len(seq_features))])
-        
-        autocorrelation = None if not autocorrelation else None
-        
-        def print_results(data_name: str, age_format: str):
-            pass
-        
-        def plot_results(figure, data_name: str, age_format: str):
-                
-            # Variance plot
+        def single(dataset: Dataset):
+            ages = dataset.ages()
+            features = dataset.features()
+            seq_features = pd.Series(np.array(features) / np.mean(np.abs(features)), index=ages[self.seq_len:])
             
-            varfig, axs = plt.subplot(1, 1, figsize=(8,5), sharex = True)
-            varfig.suptitle("Variance")
-            varfig.plot(ages[seq_len:], variance)
+                            
+            def uniform():
+                if not self.autocorrelation:
+                    return False
+                distance = ages[1] - ages[0]
+                for i in range(2, len(ages)):
+                    if ages[i] - ages[i - 1] != distance:
+                        print(f"{dataset.name} is not uniform! Cannot compute autocorrelation.")
+                        return False
+                return True
             
-            # Auto-correlation plot
+            variance = seq_features.var() if self.variance else None
+            autocorrelation = seq_features.autocorr(lag=1) if uniform() else None
+        
+            return variance, autocorrelation
+        
+        results = [(dataset, single(dataset)) for dataset in datasets]
+        
+        def print_single(result: tuple[Dataset, tuple]):
+            dataset, result = result
             
-            if autocorrelation is not None:
-                acfig, axs = plt.subplot(2, 1, figsize=(8,5), sharex = True)
-                acfig.suptitle("Autocorrelation")
+            # def print(""):
+            
+            print(f"### Results for {dataset.name}")
                    
         
-        return (print_results, plot_results)
-    
-    return ("Metric-based analysis", run)
+        def plot_single(result: tuple[Dataset, tuple]):
+            dataset, (variance, autocorrelation) = result
+            ages = dataset.ages()
+            fig: Figure = matplotlib.pyplot.figure(figsize=(8, 4))
+            fig.suptitle(dataset.name)
+            axs: Axes = fig.subplots(sum([self.variance, self.autocorrelation] * 1), 1, sharex = True)
+            
+            i = 0
+                
+            if self.variance:
+                axs[i].set_title("Variance")
+                axs[i].plot(ages[self.seq_len:], variance)
+                i+=1
+            if self.autocorrelation:
+                axs[i].set_title("Autocorrelation")
+                axs[i].plot(dataset.ages(), autocorrelation)
+                i+=1
+                
+            return fig
+        
+        return (lambda: map(print_single, results), lambda: list(map(plot_single, results)))

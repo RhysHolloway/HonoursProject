@@ -1,4 +1,5 @@
 from typing import Any, Callable, Union
+from matplotlib.figure import Figure
 import pandas as pd
 import matplotlib.pyplot as plt
 import time
@@ -79,7 +80,7 @@ class Model(metaclass = abc.ABCMeta):
         self.name = name
         
     @abc.abstractmethod
-    def runner(self, data: list[Dataset], *args):
+    def runner(self, data: list[Dataset]) -> tuple[Callable[[], None], Callable[[], list[Figure]]]:
         pass
     
     def run(self, data: list[Dataset]):
@@ -96,13 +97,11 @@ class Model(metaclass = abc.ABCMeta):
         
         if PRINT:
             print(f"###### Retrieved results for {self.name}:")
-            print_results(data)
+            print_results()
             print()
         
         if PLOT:
-            fig = plt.figure(figsize=(12,12))
-            fig.tight_layout()
-            plot_results(fig)
+            fig = plot_results()
             fig.savefig(join_path(OUTPUT_PATH, f"{self.name} {[d.name.split(" ")[0] for d in data]}.png"))
             
         print()

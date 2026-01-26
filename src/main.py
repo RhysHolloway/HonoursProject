@@ -45,8 +45,14 @@ Scotese = Dataset(
     age_scale=1000000,
 )
 
+LSTM = BuryLSTM()
+
+LSTM.with_args().run([Scotese])
+
 # DLM = DLM()
-LSTM().run([Scotese])
+Metrics(
+    seq_len = 50,
+).run([Scotese])
 
 # HMM().run([Scotese])
 

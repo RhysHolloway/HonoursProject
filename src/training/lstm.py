@@ -1,4 +1,3 @@
-from multiprocessing import freeze_support
 import sys
 from os import path
 sys.path.append( path.dirname( path.dirname( path.abspath(__file__) ) ) )
@@ -39,8 +38,7 @@ def __train(batch: int, seq_len: int) -> int:
     return code
 
 # TODO Test w/ slurm library
-def generate_training_data(batches: int, seq_len: int, bif_max: int = 5):
-    print(ROOT_PATH)
+def generate_training_data(batches: int, seq_len: int, bif_max: int = 1000):
     if not os.path.exists(join_path(ROOT_PATH, "env/")):
         raise RuntimeError("Training environment has not been setup! Please run ./setup.sh or ./source.sh")
     
@@ -73,8 +71,6 @@ def generate_model(seq_len: int):
     subprocess.call(["python", "DL_training.py", "1", "1"])
 
 if __name__ == '__main__':
-    freeze_support()
-
     # Kill all subprocesses on Ctrl-C exit
 
     generate_training_data(10, 1500)
