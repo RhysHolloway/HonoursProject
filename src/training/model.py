@@ -619,15 +619,15 @@ def compute_resids(dfs: list[pd.DataFrame]) -> list[pd.DataFrame]:
 
 ################################################################################
 
-from concurrent.futures import Future, ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import concurrent
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-tp = ThreadPoolExecutor()
+pool = ThreadPoolExecutor()
 def gen_data(counts: Counts, equi, pars, rrate, bif_max, ts_len) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
-    results: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = tp.map(
+    results: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = pool.map(
         gen_bifs, 
         range(len(pars)), 
         [counts] * len(pars),
@@ -640,23 +640,21 @@ def gen_data(counts: Counts, equi, pars, rrate, bif_max, ts_len) -> list[tuple[p
     results = [val for sublist in results for val in sublist] 
     return results
 
-pool = ProcessPoolExecutor()
-
 def kill():
-    tp.shutdown(wait=False, cancel_futures=True)
     pool.shutdown(wait=False, cancel_futures=True)
+    
 import atexit
 atexit.register(kill)
 
 def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
     print("Start batch", batch_num)    
 
-    tasks: list[Future[list[tuple[pd.DataFrame, pd.DataFrame, int]]]] = []
+    tasks: list[Future[list[tuple[pd.DataFrame, pd.DataFrame, int]]]] = [] # type: ignore
     
     equi, pars, rrate = conv()
     counts = Counts()
     
-    simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = []
+    simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = [] # type: ignore
     printer = lambda: print("Batch", batch_num, "- completed simulation", len(simulations), "with", counts.total(), "bifurcations")
     
     while counts.less_than(bif_max):
