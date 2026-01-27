@@ -23,7 +23,6 @@ import scipy
 import ruptures
 from functools import reduce
 from typing import Final
-import ewstools
 import pandas as pd
 import pycont
 from statsmodels.nonparametric.smoothers_lowess import lowess
@@ -316,12 +315,7 @@ def gen_bifs(
                             # Simulations
                             df_cut[['x']], 
                             # Residuals
-                            ewstools.core.ews_compute(
-                                df_cut['x'],
-                                smooth = 'Lowess',
-                                span = 0.2,
-                                ews=[]
-                            )['EWS metrics'][['Residuals']],
+                            compute_resid(df_cut['x']),
                             label
                         ))
                         return True
@@ -616,15 +610,12 @@ def to_traindata(
     
     return sims, resids, df_labels, df_groups
 
+def compute_resid(data: pd.Series) -> pd.Series:
+        smooth_data = lowess(data.values, data.index.values, frac=0.2)[:, 1]
+        return data.values - smooth_data
+
 def compute_resids(dfs: list[pd.DataFrame]) -> list[pd.DataFrame]:
-    return [
-        ewstools.core.ews_compute(
-                df['x'],
-                smooth = 'Lowess',
-                span = 0.2,
-                ews=[]
-            )['EWS metrics'][['Residuals']] 
-        for df in dfs]
+    return [compute_resid(df['x']) for df in dfs]
 
 ################################################################################
 
@@ -666,6 +657,7 @@ def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame]
     counts = Counts()
     
     simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = []
+    printer = lambda: print("Batch", batch_num, "- completed simulation", len(simulations), "with", counts.total(), "bifurcations")
     
     while counts.less_than(bif_max):
         while len(tasks) < 3:
@@ -677,7 +669,7 @@ def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame]
                 if task.exception() is None:
                     tasks.remove(task)
                     simulations.append(task.result())
-                    print("Batch", batch_num, "- completed simulation", len(simulations))
+                    printer()
                 else:
                     for task in tasks:
                         task.cancel()
@@ -687,9 +679,9 @@ def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame]
                             return batch(batch_num, ts_len, bif_max)
                         case e:
                             raise e
-    for task in tasks:
-        simulations.append(task.result())
-        print("Batch", batch_num, "- completed simulation", len(simulations))
+    # for task in tasks:
+    #     simulations.append(task.result())
+    #     printer()
         
     tuple = to_traindata(counts, simulations)
     
@@ -720,9 +712,9 @@ if __name__ == "__main__":
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
     args = parser.parse_args()
     
-    sims, resids, labels, groups = multibatch(batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
-    
     os.makedirs(args.output, exist_ok=False)
+    
+    sims, resids, labels, groups = multibatch(batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
     
     sims_path = os.path.join(args.output, "output_sims/")
     os.makedirs(sims_path)
