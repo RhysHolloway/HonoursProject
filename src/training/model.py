@@ -26,22 +26,23 @@ from typing import Final
 import ewstools
 import pandas as pd
 import pycont
-import scipy.integrate as spi
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import atomics
-# sys.path.append( os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ) )
-# from util import get_project_path
 
-def conv() -> tuple[np.ndarray[np.float64], np.ndarray[np.float64], np.float64]:
+def conv(
+    # Define convergence threshold
+    conv_thresh = 1e-8, 
+    # Set a proportion (chosen randomly) of the parameters to zero.
+    # Draw sparsity from uniform rv
+    sparsity=0.5
+    ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64], np.float64]:
     # Stop when system with convergence found
     while True:
         
         # Generate parameters from normal distribution
         pars = np.random.normal(loc=0,scale=1,size=20)
         
-        # Set a proportion (chosen randomly) of the parameters to zero.
-        # Draw sparsity from uniform rv
-        sparsity=0.5
+        
         index_zero = np.random.choice(range(20),int(20*sparsity),replace=False)
         pars[index_zero]=0
         #    # Try setting a1=b1=0
@@ -76,28 +77,29 @@ def conv() -> tuple[np.ndarray[np.float64], np.ndarray[np.float64], np.float64]:
         
         ## Simulate the system
         t = np.arange(0., 100, 0.01)
-        s, info_dict = spi.odeint(f, s0, t, args=(pars_a,pars_b),
-                                full_output=True,
-                                hmin=1e-14,
-                                mxhnil=0, printmessg=False)
+        with scipy.special.errstate(all='ignore'):
+            s = scipy.integrate.odeint(f, s0, t, args=(pars_a,pars_b),
+                                    full_output=False,
+                                    hmin=1e-14,
+                                    mxhnil=0, printmessg=False)
         
         # Put into pandas
         df_traj = pd.DataFrame(s, index=t, columns=['x','y'])
         
         # Does the sysetm blow up?
         if df_traj.abs().max().max() > 1e3:
-            print('System blew up - run new model')
+            # print('System blew up - run new model')
             continue
         
         # Does the system contain Nan?
         if df_traj.isna().values.any():
-            print('System contains Nan value - run new model')
+            # print('System contains Nan value - run new model')
             continue
             
         # Does the system contain inf?
         
         if np.isinf(df_traj.values).any():
-            print('System contains Inf value - run new model')
+            # print('System contains Inf value - run new model')
             continue
         
         # Does the system converge?
@@ -105,10 +107,8 @@ def conv() -> tuple[np.ndarray[np.float64], np.ndarray[np.float64], np.float64]:
         diff = df_traj.iloc[-10:-1].max() - df_traj.iloc[-10:-1].min()
         # L2 norm
         norm = np.sqrt(np.square(diff).sum())
-        # Define convergence threshold
-        conv_thresh = 1e-8
         if norm > conv_thresh:
-            print('System does not converge - run new model')
+            # print('System does not converge - run new model')
             continue
         
         break
@@ -198,9 +198,13 @@ ALLOWED_BIFS: Final[set[pycont.Types.EventKind]] = set(["BP", "LP", "HB"])
 
 def gen_bifs(
         par: int, 
+        counts: Counts,
         pars: np.ndarray,
         equi: np.ndarray,
-) -> list[dict]:
+        rrate: np.float64,
+        ts_len: int,
+        bif_max: int,
+) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
     
     # eta_sols, _ = ode.run(
     #         origin="init", starting_point='EP1', name=f'par{par}', bidirectional=True,
@@ -231,24 +235,132 @@ def gen_bifs(
        
     initial = pars[par]
        
-    cont = pycont.arclengthContinuation(
-        G, equi, initial,
-        ds_0=1e-02, ds_min=  1e-03, ds_max= 1e-01,
-        n_steps=500,
-        solver_parameters=SOLVER_PARAMETERS,
-        verbosity=pycont.Verbosity.OFF,
-    )
+    with np.errstate(invalid='ignore'):
+        cont = pycont.arclengthContinuation(
+            G, equi, initial,
+            ds_0=1e-02, ds_min=  1e-03, ds_max= 1e-01,
+            n_steps=500,
+            solver_parameters=SOLVER_PARAMETERS,
+            verbosity=pycont.Verbosity.OFF,
+        )
 
-    return [{
+    bifs = [{
         'type': branch.termination_event.kind,
         'value': branch.termination_event.p, 
         'branch_vals':branch.termination_event.u,
         'initial_param':initial,
         'param':par,
     } for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in ALLOWED_BIFS]
+    
+    
 
-# TODO: restart batch sim if this function overflows
-def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.float64], dt_sample=1, series_len=500, sigma=0.1, null_sim=False, null_location=0):
+    """
+    Created on Wed Jul 31 10:05:17 2019
+
+    @author: tbury
+
+    SCRIPT TO:
+    Get info from bifurcation output
+    Run stochastic simulations up to bifurcation points for ts_len+200 time units
+    Detect transition point using change-point algorithm
+    Ouptut time-series of ts_len time units prior to transition
+
+    """
+
+    hopf_sim = True
+    fold_sim = True
+    branch_sim = True
+    null_h_sim = True
+    null_f_sim = True
+    null_b_sim = True
+
+    # Noise amplitude
+    sigma_tilde = 0.01
+        
+    #-------------------
+    ## Simulate models
+    #------------------
+        
+    # Construct noise as in Methods
+    rv_tri = np.random.triangular(0.75,1,1.25)
+    # rv_tri = 1 # temporary
+    sigma = np.sqrt(2*rrate) * sigma_tilde * rv_tri
+
+    # Only simulate bifurcation types that have count below bif_max
+    sims: list[tuple[pd.DataFrame, pd.DataFrame, int]] = []
+    
+    # Define length of simulation
+    # This is 200 points longer than ts_len
+    # to increase the chance that we can extract ts_len data points prior to a transition
+    # (transition can occur before the bifurcation is reached)
+    series_len = ts_len + 200
+    
+    for model in bifs:
+        
+        # Pick sample spacing randomly from [0.1,0.2,...,1]
+        dt_sample = np.random.choice(np.arange(1,11)/10)
+        
+        def sim(type: str, count: atomics.INT, max: int, null_sim: bool, label: int):
+            if model['type'] == type and count.load() < max:
+                df_out = sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
+                            sigma=sigma, null_sim=null_sim)
+                trans_time = trans_detect(df_out)
+                # Only if trans_time > ts_len, keep and cut trajectory
+                if trans_time > ts_len:
+                    if count.fetch_inc() < max:
+                        df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
+                        # Have time-series start at time t=0
+                        df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
+                        df_cut.set_index('Time', inplace=True)
+                        sims.append((
+                            # Simulations
+                            df_cut[['x']], 
+                            # Residuals
+                            ewstools.core.ews_compute(
+                                df_cut['x'],
+                                smooth = 'Lowess',
+                                span = 0.2,
+                                ews=[]
+                            )['EWS metrics'][['Residuals']],
+                            label
+                        ))
+                        return True
+                    else:
+                        count.store(max)
+            return False
+        
+        try:
+            if null_h_sim and sim('HB', counts.null_h_count, bif_max // 3, True, 3):
+                null_h_sim = False
+            
+            # Simulate a null_f trajectory
+            if null_f_sim and sim('LP', counts.null_f_count, bif_max//3, True, 3):
+                null_f_sim = False
+
+                
+            # Simulate a null_b trajectory
+            if null_b_sim and sim('BP', counts.null_b_count, bif_max-2*(bif_max//3), True, 3):
+                null_b_sim = False
+
+            # Simulate a Hopf trajectory
+            if hopf_sim and sim('HB', counts.hopf_count, bif_max, False, 1):
+                hopf_sim = False
+                    
+            # Simulate a Fold trajectory
+            if fold_sim and sim('LP', counts.fold_count, bif_max, False, 0):
+                fold_sim = False
+
+            if branch_sim and sim('BP', counts.branch_count, bif_max, False, 2):
+                branch_sim = False
+        except FloatingPointError:
+            continue
+            
+    # resids = compute_resids(sims[0,])
+    
+    return sims
+    
+# Throws floating point error
+def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.float64], dt_sample=1, series_len=500, sigma=0.1, null_sim=False, null_location=0) -> pd.DataFrame:
     '''
     Function to run a stochastic simulation of model up to bifurcation point
     Input:
@@ -268,9 +380,9 @@ def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.flo
 
     
     # Simulation parameters
-    dt = 0.01
+    dt: np.float64 = 0.01
     t0 = 0
-    tburn = 100 # burn-in period
+    tburn = series_len//5 # burn-in period
 #   seed = 0 # random number generation 
     
     # Bifurcation point of model
@@ -308,8 +420,8 @@ def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.flo
         # Polynomial forms up to third order
         x: np.float64=s[0]
         y: np.float64=s[1]
-        polys = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
-        
+        polys: np.ndarray[np.float64] = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
+
         dxdt: np.float64 = np.dot(pars[10:], polys)
         dydt: np.float64 = np.dot(pars[:10], polys)
                       
@@ -331,18 +443,20 @@ def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.flo
     dW_burn = np.random.normal(loc=0, scale=sigma*np.sqrt(dt), size = [int(tburn/dt),2])
     dW = np.random.normal(loc=0, scale=sigma*np.sqrt(dt), size = [len(t/dt),2])
     
-    # Run burn-in period on s0
-    for i in range(int(tburn/dt)):
-        s0 = s0 + de_fun(s0)*dt + dW_burn[i]
+    with np.errstate(over='raise'):
         
-    # Initial condition post burn-in period
-    s[0] = s0
-    
-    # Run simulation
-    for i in range(len(t)-1):
-        # Update bifurcation parameter
-        pars[model['param']] = b.iloc[i]
-        s[i+1] = s[i] + de_fun(s[i])*dt + dW[i]
+        # Run burn-in period on s0
+        for i in range(int(tburn/dt)):
+                s0 = s0 + de_fun(s0)*dt + dW_burn[i]
+            
+        # Initial condition post burn-in period
+        s[0] = s0
+        
+        # Run simulation
+        for i in range(len(t)-1):
+            # Update bifurcation parameter
+            pars[model['param']] = b.iloc[i]
+            s[i+1] = s[i] + de_fun(s[i])*dt + dW[i]
             
     # Store series data in a DataFrame
     data = {'Time': t,'x': s[:,0],'y': s[:,1], 'b':b.values}
@@ -411,102 +525,22 @@ def trans_detect(df_in):
     return out
     
     
-def stoch_sims(
-    counts: Counts,
-    pars: np.ndarray[np.float64],
-    equi: np.ndarray[np.float64],
-    rrate: np.float64,
-    bifs: list[dict],
-    bif_max,
-    ts_len,
-) -> list[tuple[pd.DataFrame, int]]:
-    """
-    Created on Wed Jul 31 10:05:17 2019
+# def stoch_sims(
+#     counts: Counts,
+#     pars: np.ndarray[np.float64],
+#     equi: np.ndarray[np.float64],
+#     rrate: np.float64,
+#     bifs: list[dict],
+#     bif_max,
+#     ts_len,
+# ) -> list[tuple[pd.DataFrame, int]]:
 
-    @author: tbury
-
-    SCRIPT TO:
-    Get info from b.out files (AUTO files)
-    Run stochastic simulations up to bifurcation points for ts_len+200 time units
-    Detect transition point using change-point algorithm
-    Ouptut time-series of ts_len time units prior to transition
-
-    """
-
-    hopf_sim = True
-    fold_sim = True
-    branch_sim = True
-    null_h_sim = True
-    null_f_sim = True
-    null_b_sim = True
-
-    # Noise amplitude
-    sigma_tilde = 0.01
-        
-    #-------------------
-    ## Simulate models
-    #------------------
-        
-    # Construct noise as in Methods
-    rv_tri = np.random.triangular(0.75,1,1.25)
-    # rv_tri = 1 # temporary
-    sigma = np.sqrt(2*rrate) * sigma_tilde * rv_tri
-
-    # Only simulate bifurcation types that have count below bif_max
-    sims: list[tuple[pd.DataFrame, int]] = []
     
-    for model in bifs:
+#     for model in bifs:
         
-        def sim(type: str, count: atomics.INT, max: int, null_sim: bool, label: int):
-            if model['type'] == type and count.load() < max:
-                df_out = sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
-                            sigma=sigma, null_sim=null_sim)
-                trans_time = trans_detect(df_out)
-                # Only if trans_time > ts_len, keep and cut trajectory
-                if trans_time > ts_len:
-                    if count.fetch_inc() < max:
-                        df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
-                        # Have time-series start at time t=0
-                        df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
-                        df_cut.set_index('Time', inplace=True)
-                        sims.append((df_cut[['x']], label))
-                        return True
-                    else:
-                        count.store(max)
-            return False
         
-        # Pick sample spacing randomly from [0.1,0.2,...,1]
-        dt_sample = np.random.choice(np.arange(1,11)/10)
-        # Define length of simulation
-        # This is 200 points longer than ts_len
-        # to increase the chance that we can extract ts_len data points prior to a transition
-        # (transition can occur before the bifurcation is reached)
-        series_len = ts_len + 200
-        
-        if null_h_sim and sim('HB', counts.null_h_count, bif_max // 3, True, 3):
-            null_h_sim = False
-        
-        # Simulate a null_f trajectory
-        if null_f_sim and sim('LP', counts.null_f_count, bif_max//3, True, 3):
-            null_f_sim = False
 
-            
-        # Simulate a null_b trajectory
-        if null_b_sim and sim('BP', counts.null_b_count, bif_max-2*(bif_max//3), True, 3):
-            null_b_sim = False
-
-        # Simulate a Hopf trajectory
-        if hopf_sim and sim('HB', counts.hopf_count, bif_max, False, 1):
-            hopf_sim = False
-                
-        # Simulate a Fold trajectory
-        if fold_sim and sim('LP', counts.fold_count, bif_max, False, 0):
-            fold_sim = False
-
-        if branch_sim and sim('BP', counts.branch_count, bif_max, False, 2):
-            branch_sim = False
-
-    return sims
+#     return sims
 
 def to_traindata(
     counts: Counts,
@@ -601,29 +635,19 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 tp = ThreadPoolExecutor()
-def gen_data(counts: Counts, equi, pars, rrate, bif_max, batch_num, ts_len) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
-    print("START BIF DATA {}", batch_num)
-    bifs: list[list[dict]] = tp.map(gen_bifs, range(len(pars)), [pars] * len(pars), [equi] * len(pars))    
-    bifs = [val for sublist in bifs for val in sublist]
-    
-    if len(bifs) == 0:
-        print("SIM COULD NOT CONVERGE", batch_num)
-
-    print("STOCH SIMS BIF DATA {}", batch_num)
-    sims, labels = zip(*stoch_sims(
-        counts,
-        pars,
-        equi,
-        rrate,
-        bifs,
-        bif_max,
-        ts_len,
-    ))
-        
-    logger.debug("RESIDS BIF DATA {}", batch_num)
-    resids: list[pd.DataFrame] = compute_resids(sims)
-    print("END BIF DATA {}", batch_num)    
-    return zip(sims, resids, labels)
+def gen_data(counts: Counts, equi, pars, rrate, bif_max, ts_len) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
+    results: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = tp.map(
+        gen_bifs, 
+        range(len(pars)), 
+        [counts] * len(pars),
+        [pars] * len(pars),
+        [equi] * len(pars),
+        [rrate] * len(pars),
+        [ts_len] * len(pars),
+        [bif_max] * len(pars),
+    )
+    results = [val for sublist in results for val in sublist] 
+    return results
 
 pool = ProcessPoolExecutor()
 
@@ -633,8 +657,8 @@ def kill():
 import atexit
 atexit.register(kill)
 
-def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple:
-    print("Start batch {}", batch_num)    
+def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    print("Start batch", batch_num)    
 
     tasks: list[Future[list[tuple[pd.DataFrame, pd.DataFrame, int]]]] = []
     
@@ -645,38 +669,72 @@ def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple:
     
     while counts.less_than(bif_max):
         while len(tasks) < 3:
-            tasks.append(pool.submit(gen_data, counts, equi, pars, rrate, bif_max, batch_num, ts_len))
+            print("Batch", batch_num, "- starting simulation", len(simulations) + len(tasks))
+            tasks.append(pool.submit(gen_data, counts, equi, pars, rrate, bif_max, ts_len))
         concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
         for task in tasks:
             if task.done():
                 if task.exception() is None:
                     tasks.remove(task)
                     simulations.append(task.result())
+                    print("Batch", batch_num, "- completed simulation", len(simulations))
                 else:
-                    print(task.exception())
                     for task in tasks:
                         task.cancel()
                     match task.exception():
-                        case scipy.optimize.NoConvergence as e:
-                            batch(batch_num, ts_len, bif_max)
-                        case _:
-                            pass
-                    raise task.exception()
+                        case scipy.optimize.NoConvergence:
+                            print("Batch", batch_num, "- restarting as the generated function failed to converge")
+                            return batch(batch_num, ts_len, bif_max)
+                        case e:
+                            raise e
     for task in tasks:
         simulations.append(task.result())
+        print("Batch", batch_num, "- completed simulation", len(simulations))
         
-    tuple = to_traindata(counts, batch_num, simulations)
+    tuple = to_traindata(counts, simulations)
     
-    print("Finished batch {}", batch_num)    
+    print("Finished batch", batch_num)    
     return tuple
 
-def multibatch(batches: int, ts_len: int, bif_max: int):
-    
-    def concat(a: tuple, b: tuple) -> tuple:
-        return (a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3])
-    
-    return reduce(concat, pool.map(batch, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches))
+def combine(
+    a: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame], 
+    b: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]
+    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    b[2]['sequence_ID'] += len(a[0])
+    b[3]['sequence_ID'] += len(a[0])
+    return (a[0] + b[0], a[1] + b[1], pd.concat(a[2], b[2]), pd.concat(a[3], b[3]))
+
+# Returns (sims, resids, df_labels, df_groups)
+def multibatch(batches: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    return reduce(combine, pool.map(batch, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches))
 
 if __name__ == "__main__":
-    np.seterr(all='ignore')
-    print(multibatch(2, 50, 10))
+    import os
+    import argparse
+    parser = argparse.ArgumentParser(
+                    prog='LSTM Training Data Generator',
+                    description='Generates training data')
+    parser.add_argument('output', type=str)
+    parser.add_argument('-b', '--batches', type=int)
+    parser.add_argument('-l', '--length', type=int)
+    parser.add_argument('-m', '--bifurcations', type=int, default=1000)
+    args = parser.parse_args()
+    
+    sims, resids, labels, groups = multibatch(batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
+    
+    os.makedirs(args.output, exist_ok=False)
+    
+    sims_path = os.path.join(args.output, "output_sims/")
+    os.makedirs(sims_path)
+    for i, sim in enumerate(sims):
+        sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
+    
+    resids_path = os.path.join(args.output, "output_resids/")
+    os.makedirs(resids_path)
+    for i, resid in enumerate(resids):
+        resid.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
+        
+    labels.to_csv(os.path.join(args.output, "labels.csv"))
+    groups.to_csv(os.path.join(args.output, "groups.csv"))
+    
+    
