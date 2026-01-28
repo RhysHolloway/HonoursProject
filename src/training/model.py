@@ -18,21 +18,21 @@ Script to generate dynamical systems with random parameters and a stable equi:
 
 """
 
+import atomics
 import numpy as np
 import scipy
 import ruptures
 from functools import reduce
-from typing import Final
+from typing import Final, Union
 import pandas as pd
-import pycont
 from statsmodels.nonparametric.smoothers_lowess import lowess
-import atomics
+import concurrent.futures
+import scipy.optimize._nonlin as nl
 
-def conv(
+def generate_simulation(
     # Define convergence threshold
     conv_thresh = 1e-8, 
     # Set a proportion (chosen randomly) of the parameters to zero.
-    # Draw sparsity from uniform rv
     sparsity=0.5
     ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64], np.float64]:
     # Stop when system with convergence found
@@ -40,25 +40,22 @@ def conv(
         
         # Generate parameters from normal distribution
         pars = np.random.normal(loc=0,scale=1,size=20)
+
+        # Select a subset of parameters to be zero.
+        pars[np.random.choice(range(len(pars)),int(len(pars)*sparsity),replace=False)] = 0
         
-        
-        index_zero = np.random.choice(range(20),int(20*sparsity),replace=False)
-        pars[index_zero]=0
-        #    # Try setting a1=b1=0
-        #    pars[0]=0
-        #    pars[10]=0
         # Negate high order terms to encourage boundedness of solns
         pars[6:10] = -abs(pars[6:10])
         pars[16:20] = -abs(pars[16:20])
         
-        pars_a = pars[:10]
-        pars_b = pars[10:]    
-        
         # Define intial condition (2 dimensional array)
         s0 = np.random.normal(loc=0,scale=2,size=2)
         
+        # Define timesteps to solve over
+        t = np.arange(0., 100, 0.01)
+        
         # Define derivative function
-        def f(s,t0,a,b):
+        def f(_t: np.float64, s: np.ndarray[np.float64]):
             '''
             s: 2D state vector
             a: 10D vector of parameters for x dynamics
@@ -69,61 +66,107 @@ def conv(
             # Polynomial forms up to third order
             polys = np.array([1,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
             # Output
-            dydt = np.array([np.dot(a,polys), np.dot(b,polys)])
+            dydt = np.array([np.dot(pars[:10],polys), np.dot(pars[10:],polys)])
             
             return dydt
         
-        
-        ## Simulate the system
-        t = np.arange(0., 100, 0.01)
-        with scipy.special.errstate(all='ignore'):
-            s = scipy.integrate.odeint(f, s0, t, args=(pars_a,pars_b),
-                                    full_output=False,
-                                    hmin=1e-14,
-                                    mxhnil=0, printmessg=False)
-        
-        # Put into pandas
-        df_traj = pd.DataFrame(s, index=t, columns=['x','y'])
-        
-        # Does the sysetm blow up?
-        if df_traj.abs().max().max() > 1e3:
-            # print('System blew up - run new model')
-            continue
-        
-        # Does the system contain Nan?
-        if df_traj.isna().values.any():
-            # print('System contains Nan value - run new model')
-            continue
+        def solve_old():
+            import scipy.integrate
+            import warnings
+            with warnings.catch_warnings(action="ignore", category=scipy.integrate.ODEintWarning):
+                warnings.filterwarnings("ignore")
+                s = scipy.integrate.odeint(f, s0, t,
+                                        full_output=False,
+                                        hmin=1e-14,
+                                        mxhnil=0, printmessg=False, tfirst=True)
             
-        # Does the system contain inf?
+            # Put into pandas
+            df_traj = pd.DataFrame(s, index=t, columns=['x','y'])
+            
+            # Does the sysetm blow up?
+            if df_traj.abs().max().max() > 1e3:
+                # print('System blew up - run new model')
+                return None
+            
+            # Does the system contain Nan?
+            if df_traj.isna().values.any():
+                # print('System contains Nan value - run new model')
+                return None
+                
+            # Does the system contain inf?
+            
+            if np.isinf(df_traj.values).any():
+                # print('System contains Inf value - run new model')
+                return None
+            
+            # Does the system converge?
+            # Difference between max and min of last 10 data points
+            diff = df_traj.iloc[-10:-1].max() - df_traj.iloc[-10:-1].min()
+            # L2 norm
+            norm = np.sqrt(np.square(diff).sum())
+            if norm > conv_thresh:
+                # print('System does not converge - run new model')
+                return None
+            
+            return s
         
-        if np.isinf(df_traj.values).any():
-            # print('System contains Inf value - run new model')
-            continue
+        def solve_new():
         
-        # Does the system converge?
-        # Difference between max and min of last 10 data points
-        diff = df_traj.iloc[-10:-1].max() - df_traj.iloc[-10:-1].min()
-        # L2 norm
-        norm = np.sqrt(np.square(diff).sum())
-        if norm > conv_thresh:
-            # print('System does not converge - run new model')
-            continue
+            def blowup(t, y: np.ndarray[np.float64]) -> bool:
+                return np.max(np.max(np.abs(y))) > 1e3
+            blowup.terminate = True
+            
+            def is_nan(t, y: np.ndarray[np.float64]) -> bool:
+                return np.isnan(np.min(y))
+            is_nan.terminate = True
+            
+            def is_inf(t, y: np.ndarray[np.float64]) -> bool:
+                return np.isinf(np.max(np.abs(y)))
+            is_inf.terminate = True
         
-        break
+            ## Simulate the system
+            
+            from scipy.integrate import solve_ivp
+        
+            s = solve_ivp(
+                f, 
+                (min(t), max(t)), 
+                s0, 
+                t_eval=t,
+                min_step=1e-14,
+                method='LSODA',
+                # events=[blowup, is_nan, is_inf]
+            )
+            
+            if s.status != 0:
+                return None
+        
+            
+            # Does the system converge?
+            # Difference between max and min of last 10 data points
+            diff = s.y[-10:-1].max() - s.y[-10:-1].min()
+            # L2 norm
+            norm = np.sqrt(np.square(diff).sum())
+            if norm > conv_thresh:
+                return None
+            
+            return s.y
+        
+        points = solve_old()
+        if points is not None:
+            break
+    
+    
     
     # If made it this far, system is good for bifurcation continuation
     # print('System converges - export equilibria and parameter values\n')
     # Export equilibrim data
-    equi = np.array(df_traj.iloc[-1].values)
-    pars = np.concatenate([pars_a,pars_b])
-
+    equi = points[-1]
 
     ## Compute the dominant eigenvalue of this system at equilbrium
     
     # Compute the Jacobian at the equilibrium
-    x=equi[0]
-    y=equi[1]
+    x, y =equi
     [a1,a2,a3,a4,a5,a6,a7,a8,a9,a10]=pars[:10]
     [b1,b2,b3,b4,b5,b6,b7,b8,b9,b10]=pars[10:]
     
@@ -145,7 +188,15 @@ def conv(
     # Compute the real part of the dominant eigenvalue (smallest magnitude)
     rrate: np.float64 = abs(max(lam.real for lam in evals))
 
-    return (equi, pars, rrate)
+    return (pars, equi, rrate)
+
+class LocalCounts:
+    hopf_count=0
+    fold_count=0
+    branch_count=0
+    null_h_count=0
+    null_f_count=0
+    null_b_count=0
 
 class Counts:
     hopf_count=atomics.atomic(width=4, atype=atomics.INT)
@@ -166,63 +217,97 @@ class Counts:
         return self.bif_count() + self.null_count()
     
     def less_than(self, bif_max: int) -> bool:
-        return self.hopf_count.load() < bif_max or self.fold_count.load() < bif_max or self.branch_count.load() < bif_max or () < bif_max
+        return self.hopf_count.load() < bif_max or self.fold_count.load() < bif_max or self.branch_count.load() < bif_max or self.null_count() < bif_max
     
-    # def add(self, other):
-    #     self.hopf_count.g.add(other.hopf_count.fetch())
-    #     self.fold_count+=other.fold_count
-    #     self.branch_count+=other.branch_count
-    #     self.null_count+=other.null_count
-    #     self.null_h_count+=other.null_h_count
-    #     self.null_f_count+=other.null_f_count
-    #     self.null_b_count+=other.null_b_count
-        
-    
-    # def add_tuple(self, other: list[tuple]):
-    #     for t in other:
-    #         self.add(t[0])
-    #     return [t[1:] for t in other]
-        
+    def add(self, other: LocalCounts):
+        self.hopf_count.add(other.hopf_count)
+        self.fold_count.add(other.fold_count)
+        self.branch_count.add(other.branch_count)
+        self.null_h_count.add(other.null_h_count)
+        self.null_f_count.add(other.null_f_count)
+        self.null_b_count.add(other.null_b_count)
 
-# ode = pycobi.ODESystem.from_file(get_project_path("src/training/model.f90"))
 
-# PAR_IDS = [r for r in range(1, 22) if r != 11]
 SOLVER_PARAMETERS: Final[dict] = {
-    "tolerance": 1e-6,
+    "tolerance": 1e-8,
     "hopf_detection": True,
     "param_min": -5.0,
     "param_max": 5.0,
 }
-ALLOWED_BIFS: Final[set[pycont.Types.EventKind]] = set(["BP", "LP", "HB"])
+ALLOWED_BIFS: Final[set] = set(["BP", "LP", "HB"])
 
-def gen_bifs(
-        par: int, 
+def gen_data(
+        pool: concurrent.futures.ThreadPoolExecutor,
         counts: Counts,
-        pars: np.ndarray,
-        equi: np.ndarray,
-        rrate: np.float64,
         ts_len: int,
         bif_max: int,
+        simulations: list[tuple[pd.DataFrame, pd.DataFrame, int]] = [],
 ) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
+    pars, equi, rrate = generate_simulation()
     
-    # eta_sols, _ = ode.run(
-    #         origin="init", starting_point='EP1', name=f'par{par}', bidirectional=True,
-    #         NDIM=2, IPS=1, IRS=0, ILP=1,
-    #         ICP=par, 
-    #         NTST=15, NCOL=4, IAD=3, ISP=1, ISW=1, IPLT=0, NBC=0, NINT=0,
-    #         NMX=500, NPR=500,  MXBF=  -1, IID =   2, ITMX= 8, ITNW= 5, NWTN= 3, JAC= 0,
-    #         EPSL= 1e-07, EPSU = 1e-07, EPSS = 1e-05,
-    #         DS  =   1e-02, DSMIN=  1e-03, DSMAX= 1e-01, IADS=   1,
-    #         NPAR = 20, THL =  {}, THU =  {},
-    #         UZSTOP =  {1:[-5,5]}
-    #     )
-     
-    pars = pars.copy()
+    tasks = [pool.submit(simulate, counts, par, pars, equi, rrate, ts_len, bif_max) for par in range(len(pars)) if pars[par] != 0.0]
     
-    def G(u, p):
+    for task in concurrent.futures.as_completed(tasks):
+        match task.exception():
+            case None:
+                new_sims, new_counts = task.result()
+                new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
+                simulations += new_sims
+                counts.add(new_counts)
+                if not counts.less_than(bif_max):
+                    break
+            case nl.NoConvergence:
+                for task in tasks:
+                    task.cancel()
+                return gen_data(pool, counts, ts_len, bif_max, simulations=simulations)
+            case concurrent.futures.CancelledError:
+                pass
+            case e:
+                print(type(e), e)
+    
+    for task in tasks:
+        task.cancel()
+        
+    return simulations
+
+# def gen_branches_auto(
+#     par: int,
+#     pars: np.ndarray[np.float64],
+#     equi: np.ndarray[np.float64],
+# ):
+#     import pycobi
+#     import os
+#     import sys
+#     sys.path.append( os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ) )
+#     from util import get_project_path
+#     global ode
+#     if 'ode' not in globals():
+#         ode = pycobi.ODESystem(eq_file=get_project_path("src/training/model.f90"), working_dir=get_project_path("output/auto_temp"))
+
+#     data, solution = ode.run(
+#             origin="init", bidirectional=True,
+#             U=equi,
+#             PAR=pars,
+#             UZSTOP = {par:[-5,5]}
+#         )
+    
+#     print(dir(solution))  
+    
+    
+#     pass
+
+def gen_branches_py(
+        par: int,
+        pars: np.ndarray[np.float64],
+        equi: np.ndarray[np.float64],
+    ) -> list[dict]:
+    import pycont
+    initial = pars[par]
+    
+    def G(u: np.ndarray[np.float64], p: np.float64, pars: np.ndarray[np.float64] = pars.copy()):
         pars[par] = p
         
-        x, y = u[0], u[1]
+        x, y = u
         
         a1,a2,a3,a4,a5,a6,a7,a8,a9,a10 = pars[:10]
         b1,b2,b3,b4,b5,b6,b7,b8,b9,b10 = pars[10:]
@@ -232,27 +317,34 @@ def gen_bifs(
         
         return np.array([f1, f2])
        
-    initial = pars[par]
-       
     with np.errstate(invalid='ignore'):
         cont = pycont.arclengthContinuation(
-            G, equi, initial,
-            ds_0=1e-02, ds_min=  1e-03, ds_max= 1e-01,
+            G=G, u0=equi, p0=initial,
+            ds_0=1e-02, ds_min=1e-03, ds_max=1e-01,
             n_steps=500,
             solver_parameters=SOLVER_PARAMETERS,
             verbosity=pycont.Verbosity.OFF,
         )
 
-    bifs = [{
+    return [{
         'type': branch.termination_event.kind,
         'value': branch.termination_event.p, 
         'branch_vals':branch.termination_event.u,
         'initial_param':initial,
         'param':par,
-    } for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in ALLOWED_BIFS]
-    
-    
+    } for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in ALLOWED_BIFS]      
 
+def simulate(
+        prev_counts: Counts,
+        par: int,
+        pars: np.ndarray[np.float64],
+        equi: np.ndarray[np.float64],
+        rrate: np.float64,
+        ts_len: int,
+        bif_max: int) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame, tuple[str, int, int]]], LocalCounts]:
+           
+    branches = gen_branches_py(par, pars, equi)
+    
     """
     Created on Wed Jul 31 10:05:17 2019
 
@@ -266,12 +358,7 @@ def gen_bifs(
 
     """
 
-    hopf_sim = True
-    fold_sim = True
-    branch_sim = True
-    null_h_sim = True
-    null_f_sim = True
-    null_b_sim = True
+    counts = LocalCounts()
 
     # Noise amplitude
     sigma_tilde = 0.01
@@ -294,67 +381,61 @@ def gen_bifs(
     # (transition can occur before the bifurcation is reached)
     series_len = ts_len + 200
     
-    for model in bifs:
+    # print(f"Found {len(branches)} branches")
+    
+    for model in branches:
         
         # Pick sample spacing randomly from [0.1,0.2,...,1]
         dt_sample = np.random.choice(np.arange(1,11)/10)
         
-        def sim(type: str, count: atomics.INT, max: int, null_sim: bool, label: int):
-            if model['type'] == type and count.load() < max:
+        def sim(type: str, attr: str, max: int, null_sim: bool, label: int) -> bool:
+            local_count = getattr(counts, attr)
+            if  model['type'] == type and (getattr(prev_counts, attr).load() + local_count) < max:
                 df_out = sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
                             sigma=sigma, null_sim=null_sim)
+                if df_out is None:
+                    return False
                 trans_time = trans_detect(df_out)
                 # Only if trans_time > ts_len, keep and cut trajectory
+                # print(f"Trans time {trans_time}")
                 if trans_time > ts_len:
-                    if count.fetch_inc() < max:
-                        df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
-                        # Have time-series start at time t=0
-                        df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
-                        df_cut.set_index('Time', inplace=True)
-                        sims.append((
-                            # Simulations
-                            df_cut[['x']], 
-                            # Residuals
-                            compute_resid(df_cut['x']),
-                            label
-                        ))
-                        return True
-                    else:
-                        count.store(max)
+                    df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
+                    # Have time-series start at time t=0
+                    df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
+                    df_cut.set_index('Time', inplace=True)
+                    sims.append((
+                        # Simulations
+                        df_cut[['x']], 
+                        # Residuals
+                        compute_resid(df_cut['x']),
+                        (attr, max, label),
+                    ))
+                    setattr(counts, attr, local_count + 1)
+                    return True
             return False
-        
-        try:
-            if null_h_sim and sim('HB', counts.null_h_count, bif_max // 3, True, 3):
-                null_h_sim = False
-            
-            # Simulate a null_f trajectory
-            if null_f_sim and sim('LP', counts.null_f_count, bif_max//3, True, 3):
-                null_f_sim = False
 
-                
-            # Simulate a null_b trajectory
-            if null_b_sim and sim('BP', counts.null_b_count, bif_max-2*(bif_max//3), True, 3):
-                null_b_sim = False
-
-            # Simulate a Hopf trajectory
-            if hopf_sim and sim('HB', counts.hopf_count, bif_max, False, 1):
-                hopf_sim = False
-                    
-            # Simulate a Fold trajectory
-            if fold_sim and sim('LP', counts.fold_count, bif_max, False, 0):
-                fold_sim = False
-
-            if branch_sim and sim('BP', counts.branch_count, bif_max, False, 2):
-                branch_sim = False
-        except FloatingPointError:
-            continue
-            
-    # resids = compute_resids(sims[0,])
+        sim('HB', 'null_h_count', bif_max // 3, True, 3)
+        sim('LP', 'null_f_count', bif_max//3, True, 3)
+        sim('BP', 'null_b_count', bif_max-2*(bif_max//3), True, 3)
+        sim('HB', 'hopf_count', bif_max, False, 1)
+        sim('LP', 'fold_count', bif_max, False, 0)
+        sim('BP', 'branch_count', bif_max, False, 2)
     
-    return sims
+    return sims, counts
     
 # Throws floating point error
-def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.float64], dt_sample=1, series_len=500, sigma=0.1, null_sim=False, null_location=0) -> pd.DataFrame:
+def sim_model(
+    model: dict, 
+    pars: np.ndarray[np.float64], 
+    equi: np.ndarray[np.float64], 
+    dt_sample: float, 
+    series_len: int, 
+    sigma: float, 
+    null_sim: bool, 
+    null_location=0,
+    dt: np.float64 = 0.01,
+    tburn = 100 # burn-in period
+    ) -> Union[None, pd.DataFrame]:
     '''
     Function to run a stochastic simulation of model up to bifurcation point
     Input:
@@ -372,11 +453,11 @@ def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.flo
         DataFrame of trajectories indexed by time
     '''
 
+    pars = pars.copy()
     
     # Simulation parameters
-    dt: np.float64 = 0.01
+
     t0 = 0
-    tburn = series_len//5 # burn-in period
 #   seed = 0 # random number generation 
     
     # Bifurcation point of model
@@ -440,17 +521,27 @@ def sim_model(model: dict, pars: np.ndarray[np.float64], equi: np.ndarray[np.flo
     with np.errstate(over='raise'):
         
         # Run burn-in period on s0
-        for i in range(int(tburn/dt)):
+        period = int(tburn/dt)
+        for i in range(period):
+            try:
                 s0 = s0 + de_fun(s0)*dt + dW_burn[i]
+            except FloatingPointError:
+                # print("Overflowed while burning in from", s0)
+                return None
             
         # Initial condition post burn-in period
         s[0] = s0
         
         # Run simulation
         for i in range(len(t)-1):
-            # Update bifurcation parameter
-            pars[model['param']] = b.iloc[i]
-            s[i+1] = s[i] + de_fun(s[i])*dt + dW[i]
+            try:
+                # Update bifurcation parameter
+                pars[model['param']] = b.iloc[i]
+                s[i+1] = s[i] + de_fun(s[i])*dt + dW[i]
+            except FloatingPointError:
+                for j in range(i+1, len(t)-1):
+                    s[j] = np.nan
+                break
             
     # Store series data in a DataFrame
     data = {'Time': t,'x': s[:,0],'y': s[:,1], 'b':b.values}
@@ -504,8 +595,7 @@ def trans_detect(df_in):
         
         array_traj = resid_series.values.transpose()
         # Window-based change point detection
-        model = "l2"
-        algo = ruptures.Window(width=10, model=model, jump=1, min_size=2).fit(array_traj)
+        algo = ruptures.Window(width=10, model="l2", jump=1, min_size=2).fit(array_traj)
         # Break points - higher penalty means less likely to detect jumps
         bps = algo.predict(pen=1)
         
@@ -560,11 +650,10 @@ def to_traindata(
     #-----------------------------
 
     df_labels: pd.DataFrame = pd.DataFrame(
-        {
-            'sequence_ID': [i] * len(run), 
-            'class_label': [label for _,_,label in run]
-        } for i, run in enumerate(simulations))
-    
+        ((i, label) 
+        for i, run in enumerate(simulations)
+        for _,_,label in run), columns = ['sequence_ID', 'class_label']
+    )
 
     #----------------------------
     # Create groups file in ratio for training:validation:testing
@@ -575,7 +664,7 @@ def to_traindata(
     # Use raito 38:1:1        
 
     # Collect Fold bifurcations (label 0)
-    df_fold = df_labels[df_labels['class_label']==0].copy()
+    df_fold = df_labels[df_labels[['class_label']]==0].copy()
     # Collect Hopf bifurcations (label 1)
     df_hopf = df_labels[df_labels['class_label']==1].copy()
     # Collect Branch points (label 2)
@@ -619,67 +708,50 @@ def compute_resids(dfs: list[pd.DataFrame]) -> list[pd.DataFrame]:
 
 ################################################################################
 
-from concurrent.futures import Future, ThreadPoolExecutor
-import concurrent
+import concurrent.futures
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-pool = ThreadPoolExecutor()
-def gen_data(counts: Counts, equi, pars, rrate, bif_max, ts_len) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
-    results: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = pool.map(
-        gen_bifs, 
-        range(len(pars)), 
-        [counts] * len(pars),
-        [pars] * len(pars),
-        [equi] * len(pars),
-        [rrate] * len(pars),
-        [ts_len] * len(pars),
-        [bif_max] * len(pars),
-    )
-    results = [val for sublist in results for val in sublist] 
-    return results
-
-def kill():
-    pool.shutdown(wait=False, cancel_futures=True)
-    
-import atexit
-atexit.register(kill)
-
-def batch(batch_num: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+def batch(batch_num: int, ts_len: int, bif_max: int, pool: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor()) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
     print("Start batch", batch_num)    
 
-    tasks: list[Future[list[tuple[pd.DataFrame, pd.DataFrame, int]]]] = [] # type: ignore
+    tasks: list[Future[tuple[list[tuple[pd.DataFrame, pd.DataFrame, int]], Counts]]] = [] # type: ignore
     
-    equi, pars, rrate = conv()
     counts = Counts()
     
     simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = [] # type: ignore
-    printer = lambda: print("Batch", batch_num, "- completed simulation", len(simulations), "with", counts.total(), "bifurcations")
     
     while counts.less_than(bif_max):
         while len(tasks) < 3:
-            print("Batch", batch_num, "- starting simulation", len(simulations) + len(tasks))
-            tasks.append(pool.submit(gen_data, counts, equi, pars, rrate, bif_max, ts_len))
+            tasks.append(
+                pool.submit(
+                    gen_data,
+                    pool,
+                    counts,
+                    ts_len,
+                    bif_max,
+                )
+            )
         concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
         for task in tasks:
-            if task.done():
-                if task.exception() is None:
-                    tasks.remove(task)
-                    simulations.append(task.result())
-                    printer()
-                else:
-                    for task in tasks:
-                        task.cancel()
-                    match task.exception():
-                        case scipy.optimize.NoConvergence:
-                            print("Batch", batch_num, "- restarting as the generated function failed to converge")
-                            return batch(batch_num, ts_len, bif_max)
-                        case e:
-                            raise e
-    # for task in tasks:
-    #     simulations.append(task.result())
-    #     printer()
+            if counts.less_than(bif_max) and task.done():
+                match task.exception():
+                    case None:
+                        tasks.remove(task)
+                        simulations.append(task.result())
+                        print("Batch", batch_num, "- completed simulation", len(simulations), "- now at", counts.total(), "bifurcations")
+                    # case nl.NoConvergence:
+                    #     for task in tasks:
+                    #         task.cancel()
+                    #     tasks.clear()
+                    #     print("Batch", batch_num, "- restarting as the generated function failed to converge")
+                    #     return batch(batch_num, ts_len, bif_max)
+                    case concurrent.futures.CancelledError:
+                        pass
+                    case e:
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise e
         
     tuple = to_traindata(counts, simulations)
     
@@ -690,15 +762,25 @@ def combine(
     a: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame], 
     b: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]
     ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
-    b[2]['sequence_ID'] += len(a[0])
-    b[3]['sequence_ID'] += len(a[0])
-    return (a[0] + b[0], a[1] + b[1], pd.concat(a[2], b[2]), pd.concat(a[3], b[3]))
+    new2 = b[2]['sequence_ID'] + len(a[0])
+    new3 = b[3]['sequence_ID'] + len(a[0])
+    return (a[0] + b[0], a[1] + b[1], pd.concat([a[2], new2]), pd.concat([a[3], new3]))
 
 # Returns (sims, resids, df_labels, df_groups)
 def multibatch(batches: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
-    return reduce(combine, pool.map(batch, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches))
+    
+    pool = concurrent.futures.ThreadPoolExecutor()
+    
+    def kill():
+        pool.shutdown(wait=False, cancel_futures=True)
+        
+    import atexit
+    atexit.register(kill)
+    
+    return reduce(combine, pool.map(batch, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [pool] * batches))
 
 if __name__ == "__main__":
+    
     import os
     import argparse
     parser = argparse.ArgumentParser(
@@ -713,6 +795,7 @@ if __name__ == "__main__":
     os.makedirs(args.output, exist_ok=False)
     
     sims, resids, labels, groups = multibatch(batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
+    # sims, resids, labels, groups = batch(batch_num=1, ts_len=args.length, bif_max=args.bifurcations)
     
     sims_path = os.path.join(args.output, "output_sims/")
     os.makedirs(sims_path)
