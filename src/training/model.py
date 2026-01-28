@@ -779,9 +779,26 @@ def multibatch(batches: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFra
     
     return reduce(combine, pool.map(batch, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [pool] * batches))
 
-if __name__ == "__main__":
+def save(path, tuple: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]):
+    import os.path
+    sims, resids, labels, groups = tuple
     
-    import os
+    os.makedirs(path, exist_ok=False)
+    
+    sims_path = os.path.join(path, "output_sims/")
+    os.makedirs(sims_path)
+    for i, sim in enumerate(sims):
+        sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
+    
+    resids_path = os.path.join(path, "output_resids/")
+    os.makedirs(resids_path)
+    for i, resid in enumerate(resids):
+        resid.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
+        
+    labels.to_csv(os.path.join(path, "labels.csv"))
+    groups.to_csv(os.path.join(path, "groups.csv"))
+    
+if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(
                     prog='LSTM Training Data Generator',
@@ -792,22 +809,7 @@ if __name__ == "__main__":
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
     args = parser.parse_args()
     
-    os.makedirs(args.output, exist_ok=False)
-    
-    sims, resids, labels, groups = multibatch(batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
-    # sims, resids, labels, groups = batch(batch_num=1, ts_len=args.length, bif_max=args.bifurcations)
-    
-    sims_path = os.path.join(args.output, "output_sims/")
-    os.makedirs(sims_path)
-    for i, sim in enumerate(sims):
-        sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
-    
-    resids_path = os.path.join(args.output, "output_resids/")
-    os.makedirs(resids_path)
-    for i, resid in enumerate(resids):
-        resid.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
-        
-    labels.to_csv(os.path.join(args.output, "labels.csv"))
-    groups.to_csv(os.path.join(args.output, "groups.csv"))
+    save(args.output, multibatch(batches=args.batches, ts_len=args.length, bif_max=args.bifurcations))
+
     
     
