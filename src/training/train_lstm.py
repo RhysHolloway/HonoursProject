@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+
+Modified script made to run using only one file
+
+@author: Rhys Holloway, Thomas Bury
+
+"""
+
+"""
 Created on Mon Jul 15 15:24:37 2019
 
 @author: Thomas Bury
@@ -18,18 +26,19 @@ Script to generate dynamical systems with random parameters and a stable equi:
 
 """
 
+import builtins
 import atomics
 import numpy as np
-import scipy
 import ruptures
 from functools import reduce
-from typing import Final, Union
+from typing import Callable, Final, Union
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
+from concurrent.futures import Executor, Future
 import scipy.optimize._nonlin as nl
 
-def generate_simulation(
+def _generate_simulation(
     # Define convergence threshold
     conv_thresh = 1e-8, 
     # Set a proportion (chosen randomly) of the parameters to zero.
@@ -51,7 +60,7 @@ def generate_simulation(
         # Define intial condition (2 dimensional array)
         s0 = np.random.normal(loc=0,scale=2,size=2)
         
-        # Define timesteps to solve over
+        # Define timesteps to evaluate at
         t = np.arange(0., 100, 0.01)
         
         # Define derivative function
@@ -84,19 +93,9 @@ def generate_simulation(
             df_traj = pd.DataFrame(s, index=t, columns=['x','y'])
             
             # Does the sysetm blow up?
-            if df_traj.abs().max().max() > 1e3:
-                # print('System blew up - run new model')
-                return None
-            
             # Does the system contain Nan?
-            if df_traj.isna().values.any():
-                # print('System contains Nan value - run new model')
-                return None
-                
             # Does the system contain inf?
-            
-            if np.isinf(df_traj.values).any():
-                # print('System contains Inf value - run new model')
+            if df_traj.abs().max().max() > 1e3 or df_traj.isna().values.any() or np.isinf(df_traj.values).any():
                 return None
             
             # Does the system converge?
@@ -152,6 +151,36 @@ def generate_simulation(
             
             return s.y
         
+        # def solve_jax():
+                        
+        #     import jax
+        #     import diffrax
+        #     import jax.numpy as jnp
+            
+        #     if conv_thresh <= 1e-8:
+        #         jax.config.update("jax_enable_x64", True)
+                
+        #     class Robertson(eqx.Module):
+        #         k1: float
+        #         k2: float
+        #         k3: float
+
+        #         def __call__(self, t, y, args):
+                    
+                    
+        #             f0 = -self.k1 * y[0] + self.k3 * y[1] * y[2]
+        #             f1 = self.k1 * y[0] - self.k2 * y[1] ** 2 - self.k3 * y[1] * y[2]
+        #             f2 = self.k2 * y[1] ** 2
+                    
+        #                 x = y[0]
+        #                 y = y[1]
+        #                 # Polynomial forms up to third order
+        #                 polys = np.array([1,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
+        #                 # Output
+        #                 dydt = np.array([np.dot(pars[:10],polys), np.dot(pars[10:],polys)])
+                    
+        #             return jnp.stack([f0, f1, f2])
+        
         points = solve_old()
         if points is not None:
             break
@@ -190,7 +219,7 @@ def generate_simulation(
 
     return (pars, equi, rrate)
 
-class LocalCounts:
+class _LocalCounts:
     hopf_count=0
     fold_count=0
     branch_count=0
@@ -198,7 +227,7 @@ class LocalCounts:
     null_f_count=0
     null_b_count=0
 
-class Counts:
+class _Counts:
     hopf_count=atomics.atomic(width=4, atype=atomics.INT)
     fold_count=atomics.atomic(width=4, atype=atomics.INT)
     branch_count=atomics.atomic(width=4, atype=atomics.INT)
@@ -219,7 +248,7 @@ class Counts:
     def less_than(self, bif_max: int) -> bool:
         return self.hopf_count.load() < bif_max or self.fold_count.load() < bif_max or self.branch_count.load() < bif_max or self.null_count() < bif_max
     
-    def add(self, other: LocalCounts):
+    def add(self, other: _LocalCounts):
         self.hopf_count.add(other.hopf_count)
         self.fold_count.add(other.fold_count)
         self.branch_count.add(other.branch_count)
@@ -236,16 +265,21 @@ SOLVER_PARAMETERS: Final[dict] = {
 }
 ALLOWED_BIFS: Final[set] = set(["BP", "LP", "HB"])
 
-def gen_data(
-        pool: concurrent.futures.ThreadPoolExecutor,
-        counts: Counts,
+def _trace(e: BaseException):
+    import traceback
+    import sys
+    print(traceback.format_exception(type(e), e, e.__traceback__), file=sys.stderr, flush=True)
+
+def _gen_data(
+        pool: concurrent.futures.Executor,
+        counts: _Counts,
         ts_len: int,
         bif_max: int,
         simulations: list[tuple[pd.DataFrame, pd.DataFrame, int]] = [],
 ) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
-    pars, equi, rrate = generate_simulation()
+    pars, equi, rrate = _generate_simulation()
     
-    tasks = [pool.submit(simulate, counts, par, pars, equi, rrate, ts_len, bif_max) for par in range(len(pars)) if pars[par] != 0.0]
+    tasks = [pool.submit(_simulate, counts, par, pars, equi, rrate, ts_len, bif_max) for par in range(len(pars)) if pars[par] != 0.0]
     
     for task in concurrent.futures.as_completed(tasks):
         match task.exception():
@@ -256,50 +290,31 @@ def gen_data(
                 counts.add(new_counts)
                 if not counts.less_than(bif_max):
                     break
-            case nl.NoConvergence:
-                for task in tasks:
-                    task.cancel()
-                return gen_data(pool, counts, ts_len, bif_max, simulations=simulations)
-            case concurrent.futures.CancelledError:
+            case ValueError("Jacobian inversion yielded zero vector. "
+                             "This indicates a bug in the Jacobian "
+                             "approximation."):
                 pass
             case e:
-                print(type(e), e)
+                match type(e):
+                    case nl.NoConvergence:
+                        for task in tasks:
+                            task.cancel()
+                        return _gen_data(pool, counts, ts_len, bif_max, simulations=simulations)
+                    case concurrent.futures.CancelledError | builtins.UnboundLocalError:
+                        pass
+                    case _:
+                        _trace(e)
     
     for task in tasks:
         task.cancel()
         
     return simulations
 
-# def gen_branches_auto(
-#     par: int,
-#     pars: np.ndarray[np.float64],
-#     equi: np.ndarray[np.float64],
-# ):
-#     import pycobi
-#     import os
-#     import sys
-#     sys.path.append( os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ) )
-#     from util import get_project_path
-#     global ode
-#     if 'ode' not in globals():
-#         ode = pycobi.ODESystem(eq_file=get_project_path("src/training/model.f90"), working_dir=get_project_path("output/auto_temp"))
-
-#     data, solution = ode.run(
-#             origin="init", bidirectional=True,
-#             U=equi,
-#             PAR=pars,
-#             UZSTOP = {par:[-5,5]}
-#         )
-    
-#     print(dir(solution))  
-    
-    
-#     pass
-
-def gen_branches_py(
+def _gen_branches_py(
         par: int,
         pars: np.ndarray[np.float64],
         equi: np.ndarray[np.float64],
+        steps: int = 500,
     ) -> list[dict]:
     import pycont
     initial = pars[par]
@@ -321,7 +336,7 @@ def gen_branches_py(
         cont = pycont.arclengthContinuation(
             G=G, u0=equi, p0=initial,
             ds_0=1e-02, ds_min=1e-03, ds_max=1e-01,
-            n_steps=500,
+            n_steps=steps,
             solver_parameters=SOLVER_PARAMETERS,
             verbosity=pycont.Verbosity.OFF,
         )
@@ -334,16 +349,16 @@ def gen_branches_py(
         'param':par,
     } for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in ALLOWED_BIFS]      
 
-def simulate(
-        prev_counts: Counts,
+def _simulate(
+        prev_counts: _Counts,
         par: int,
         pars: np.ndarray[np.float64],
         equi: np.ndarray[np.float64],
         rrate: np.float64,
         ts_len: int,
-        bif_max: int) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame, tuple[str, int, int]]], LocalCounts]:
+        bif_max: int) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame, tuple[str, int, int]]], _LocalCounts]:
            
-    branches = gen_branches_py(par, pars, equi)
+    branches = _gen_branches_py(par, pars, equi)
     
     """
     Created on Wed Jul 31 10:05:17 2019
@@ -358,7 +373,7 @@ def simulate(
 
     """
 
-    counts = LocalCounts()
+    counts = _LocalCounts()
 
     # Noise amplitude
     sigma_tilde = 0.01
@@ -391,11 +406,11 @@ def simulate(
         def sim(type: str, attr: str, max: int, null_sim: bool, label: int) -> bool:
             local_count = getattr(counts, attr)
             if  model['type'] == type and (getattr(prev_counts, attr).load() + local_count) < max:
-                df_out = sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
+                df_out = _sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
                             sigma=sigma, null_sim=null_sim)
                 if df_out is None:
                     return False
-                trans_time = trans_detect(df_out)
+                trans_time = _trans_detect(df_out)
                 # Only if trans_time > ts_len, keep and cut trajectory
                 # print(f"Trans time {trans_time}")
                 if trans_time > ts_len:
@@ -407,7 +422,7 @@ def simulate(
                         # Simulations
                         df_cut[['x']], 
                         # Residuals
-                        compute_resid(df_cut['x']),
+                        _compute_resid(df_cut['x']),
                         (attr, max, label),
                     ))
                     setattr(counts, attr, local_count + 1)
@@ -424,7 +439,7 @@ def simulate(
     return sims, counts
     
 # Throws floating point error
-def sim_model(
+def _sim_model(
     model: dict, 
     pars: np.ndarray[np.float64], 
     equi: np.ndarray[np.float64], 
@@ -558,7 +573,7 @@ def sim_model(
     return df_traj_filt
     
 # Function to detect change points
-def trans_detect(df_in):
+def _trans_detect(df_in):
     '''
     Function to detect a change point in a time series
     Input:
@@ -607,27 +622,9 @@ def trans_detect(df_in):
     # Output minimum of tnan or tjump
     out = min(max(0,t_nan-1),t_jump-1)
     return out
-    
-    
-# def stoch_sims(
-#     counts: Counts,
-#     pars: np.ndarray[np.float64],
-#     equi: np.ndarray[np.float64],
-#     rrate: np.float64,
-#     bifs: list[dict],
-#     bif_max,
-#     ts_len,
-# ) -> list[tuple[pd.DataFrame, int]]:
 
-    
-#     for model in bifs:
-        
-        
-
-#     return sims
-
-def to_traindata(
-    counts: Counts,
+def _to_traindata(
+    counts: _Counts,
     simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]]
 ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
     
@@ -699,91 +696,147 @@ def to_traindata(
     
     return sims, resids, df_labels, df_groups
 
-def compute_resid(data: pd.Series) -> pd.Series:
+def _compute_resid(data: pd.Series) -> pd.Series:
         smooth_data = lowess(data.values, data.index.values, frac=0.2)[:, 1]
         return data.values - smooth_data
 
-def compute_resids(dfs: list[pd.DataFrame]) -> list[pd.DataFrame]:
-    return [compute_resid(df['x']) for df in dfs]
+def _compute_resids(dfs: list[pd.DataFrame]) -> list[pd.DataFrame]:
+    return [_compute_resid(df['x']) for df in dfs]
 
 ################################################################################
 
-import concurrent.futures
+from typing import Tuple
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-def batch(batch_num: int, ts_len: int, bif_max: int, pool: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor()) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
-    print("Start batch", batch_num)    
+DEFAULT_MAX_CONCURRENT_SIMS: Final[int] = 3
 
-    tasks: list[Future[tuple[list[tuple[pd.DataFrame, pd.DataFrame, int]], Counts]]] = [] # type: ignore
-    
-    counts = Counts()
-    
-    simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]] = [] # type: ignore
-    
-    while counts.less_than(bif_max):
-        while len(tasks) < 3:
-            tasks.append(
-                pool.submit(
-                    gen_data,
-                    pool,
-                    counts,
-                    ts_len,
-                    bif_max,
-                )
-            )
-        concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
-        for task in tasks:
-            if counts.less_than(bif_max) and task.done():
-                match task.exception():
-                    case None:
-                        tasks.remove(task)
-                        simulations.append(task.result())
-                        print("Batch", batch_num, "- completed simulation", len(simulations), "- now at", counts.total(), "bifurcations")
-                    # case nl.NoConvergence:
-                    #     for task in tasks:
-                    #         task.cancel()
-                    #     tasks.clear()
-                    #     print("Batch", batch_num, "- restarting as the generated function failed to converge")
-                    #     return batch(batch_num, ts_len, bif_max)
-                    case concurrent.futures.CancelledError:
-                        pass
-                    case e:
-                        pool.shutdown(wait=False, cancel_futures=True)
-                        raise e
-        
-    tuple = to_traindata(counts, simulations)
-    
-    print("Finished batch", batch_num)    
-    return tuple
 
-def combine(
-    a: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame], 
-    b: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]
-    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
-    new2 = b[2]['sequence_ID'] + len(a[0])
-    new3 = b[3]['sequence_ID'] + len(a[0])
-    return (a[0] + b[0], a[1] + b[1], pd.concat([a[2], new2]), pd.concat([a[3], new3]))
-
-# Returns (sims, resids, df_labels, df_groups)
-def multibatch(batches: int, ts_len: int, bif_max: int) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
-    
+def _new_pool():
     pool = concurrent.futures.ThreadPoolExecutor()
-    
+        
     def kill():
         pool.shutdown(wait=False, cancel_futures=True)
         
     import atexit
     atexit.register(kill)
     
-    return reduce(combine, pool.map(batch, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [pool] * batches))
+    return pool
 
-def save(path, tuple: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]):
+def batch(
+    batch_num: int, 
+    ts_len: int, 
+    bif_max: int, 
+    pool: Executor = _new_pool(),
+    max_concurrent_sims: int = DEFAULT_MAX_CONCURRENT_SIMS,
+    ) -> Tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    
+    if max_concurrent_sims <= 0:
+        raise ValueError("Max concurrent sims is less than or equal to 0!")
+    
+    print("Start batch", batch_num)    
+    
+    counts = _Counts()
+    
+    simulations: list[list[Tuple[pd.DataFrame, pd.DataFrame, int]]] = []
+    
+    if max_concurrent_sims == 1:
+        while counts.less_than(bif_max):
+            simulations.append(
+                _gen_data(
+                    pool,
+                    counts,
+                    ts_len,
+                    bif_max,                    
+                )
+            )
+    else:
+        tasks: list[Future[Tuple[list[Tuple[pd.DataFrame, pd.DataFrame, int]], _Counts]]] = []
+        while counts.less_than(bif_max):
+            while len(tasks) < max_concurrent_sims:
+                tasks.append(
+                    pool.submit(
+                        _gen_data,
+                        pool,
+                        counts,
+                        ts_len,
+                        bif_max,
+                    )
+                )
+            concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
+            for task in tasks:
+                if counts.less_than(bif_max) and task.done():
+                    match task.exception():
+                        case None:
+                            tasks.remove(task)
+                            simulations.append(task.result())
+                            print("Batch", batch_num, "- completed simulation", len(simulations), "- now at", counts.total(), "bifurcations")
+                        case e:
+                            match type(e):
+                                case concurrent.futures.CancelledError:
+                                    pass
+                                case _:
+                                    # batch_pool.shutdown(wait=False, cancel_futures=True)
+                                    _trace(e)
+    
+    print("Processing data for batch", batch_num)
+    
+    tuple = _to_traindata(counts, simulations)
+    
+    print("Finished batch", batch_num)    
+    return tuple
+
+def batch_and_save(
+    path,
+    batch_num: int, 
+    ts_len: int, 
+    bif_max: int, 
+    pool: Executor = _new_pool(),
+    max_concurrent_sims: int = DEFAULT_MAX_CONCURRENT_SIMS,
+    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:        
     import os.path
-    sims, resids, labels, groups = tuple
+    return save(os.path.join(path, f"batch{batch_num}"), lambda: batch(batch_num, ts_len, bif_max, pool, max_concurrent_sims))
+
+# Returns combined (sims, resids, df_labels, df_groups)
+def combine(
+        a: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame], 
+        b: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]
+    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    new2 = b[2]['sequence_ID'] + len(a[0])
+    new3 = b[3]['sequence_ID'] + len(a[0])
+    return (a[0] + b[0], a[1] + b[1], pd.concat([a[2], new2]), pd.concat([a[3], new3]))
+
+# Returns (sims, resids, df_labels, df_groups)
+def multibatch(
+        path, 
+        batch_pool: Executor, 
+        sim_pool: Executor, 
+        batches: int, 
+        ts_len: int, 
+        bif_max: int, 
+        max_concurrent_sims: int = DEFAULT_MAX_CONCURRENT_SIMS
+    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+        
+    if batches <= 0:
+        raise ValueError("Batches is less than or equal to 0!")
+    
+    if max_concurrent_sims <= 0:
+        raise ValueError("Max concurrent sims is less than or equal to 0!")
+    
+    if batches >= 1:
+        import os.path
+        return save(os.path.join(path, "combined/"), lambda: reduce(combine, batch_pool.map(batch_and_save, [path] * batches), range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [sim_pool] * batches, [max_concurrent_sims] * batches))
+    else:
+        return batch_and_save(path, batch_num=1, ts_len=ts_len, bif_max=bif_max, pool=sim_pool, max_concurrent_sims=max_concurrent_sims)
+    
+
+def save(path, generator: Callable[[], tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]]) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    import os.path
     
     os.makedirs(path, exist_ok=False)
+    
+    sims, resids, labels, groups = generator()
     
     sims_path = os.path.join(path, "output_sims/")
     os.makedirs(sims_path)
@@ -798,7 +851,10 @@ def save(path, tuple: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame
     labels.to_csv(os.path.join(path, "labels.csv"))
     groups.to_csv(os.path.join(path, "groups.csv"))
     
-if __name__ == "__main__":
+    return sims, resids, labels, groups
+    
+def run_with_args():
+    
     import argparse
     parser = argparse.ArgumentParser(
                     prog='LSTM Training Data Generator',
@@ -807,9 +863,14 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--batches', type=int)
     parser.add_argument('-l', '--length', type=int)
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
+    parser.add_argument('-s', '--max-concurrent-sims', type=int, default=DEFAULT_MAX_CONCURRENT_SIMS)
     args = parser.parse_args()
     
-    save(args.output, multibatch(batches=args.batches, ts_len=args.length, bif_max=args.bifurcations))
+    multibatch(path=args.output, batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
+    
+if __name__ == "__main__":
+    run_with_args()
+   
 
     
     
