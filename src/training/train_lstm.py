@@ -271,42 +271,50 @@ def _trace(e: BaseException):
     print(traceback.format_exception(type(e), e, e.__traceback__), file=sys.stderr, flush=True)
 
 def _gen_data(
-        pool: concurrent.futures.Executor,
         counts: _Counts,
         ts_len: int,
         bif_max: int,
+        pool: Union[Executor, None] = None,
         simulations: list[tuple[pd.DataFrame, pd.DataFrame, int]] = [],
 ) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
     pars, equi, rrate = _generate_simulation()
     
-    tasks = [pool.submit(_simulate, counts, par, pars, equi, rrate, ts_len, bif_max) for par in range(len(pars)) if pars[par] != 0.0]
+    GENERATOR: lambda func: [func(par) for par in range(len(pars)) if pars[par] != 0.0]
     
-    for task in concurrent.futures.as_completed(tasks):
-        match task.exception():
-            case None:
-                new_sims, new_counts = task.result()
-                new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
-                simulations += new_sims
-                counts.add(new_counts)
-                if not counts.less_than(bif_max):
-                    break
-            case ValueError("Jacobian inversion yielded zero vector. "
-                             "This indicates a bug in the Jacobian "
-                             "approximation."):
-                pass
-            case e:
-                match type(e):
-                    case nl.NoConvergence:
-                        for task in tasks:
-                            task.cancel()
-                        return _gen_data(pool, counts, ts_len, bif_max, simulations=simulations)
-                    case concurrent.futures.CancelledError | builtins.UnboundLocalError:
-                        pass
-                    case _:
-                        _trace(e)
-    
-    for task in tasks:
-        task.cancel()
+    if pool is None:
+        while counts.less_than(bif_max):
+            new_sims, new_counts = GENERATOR(lambda par: _simulate(counts, par, pars, equi, rrate, ts_len, bif_max))
+            new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
+            simulations += new_sims
+            counts.add(new_counts)
+    else:
+        tasks = GENERATOR(lambda par: pool.submit(_simulate, counts, par, pars, equi, rrate, ts_len, bif_max))
+        for task in concurrent.futures.as_completed(tasks):
+            match task.exception():
+                case None:
+                    new_sims, new_counts = task.result()
+                    new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
+                    simulations += new_sims
+                    counts.add(new_counts)
+                    if not counts.less_than(bif_max):
+                        break
+                case ValueError("Jacobian inversion yielded zero vector. "
+                                "This indicates a bug in the Jacobian "
+                                "approximation."):
+                    pass
+                case e:
+                    match type(e):
+                        case nl.NoConvergence:
+                            for task in tasks:
+                                task.cancel()
+                            return _gen_data(counts, ts_len, bif_max, pool=pool, simulations=simulations)
+                        case concurrent.futures.CancelledError | builtins.UnboundLocalError:
+                            pass
+                        case _:
+                            _trace(e)
+        
+        for task in tasks:
+            task.cancel()
         
     return simulations
 
@@ -728,12 +736,8 @@ def batch(
     batch_num: int, 
     ts_len: int, 
     bif_max: int, 
-    pool: Executor = _new_pool(),
-    max_concurrent_sims: int = DEFAULT_MAX_CONCURRENT_SIMS,
+    pool: Union[Executor, None, Callable[[], Executor]] = _new_pool(),
     ) -> Tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
-    
-    if max_concurrent_sims <= 0:
-        raise ValueError("Max concurrent sims is less than or equal to 0!")
     
     print("Start batch", batch_num)    
     
@@ -741,27 +745,31 @@ def batch(
     
     simulations: list[list[Tuple[pd.DataFrame, pd.DataFrame, int]]] = []
     
-    if max_concurrent_sims == 1:
+    if pool is None:
         while counts.less_than(bif_max):
             simulations.append(
                 _gen_data(
-                    pool,
                     counts,
                     ts_len,
-                    bif_max,                    
+                    bif_max,
+                    pool=None,
                 )
             )
     else:
+        
+        if pool is Callable:
+            pool = pool()
+        
         tasks: list[Future[Tuple[list[Tuple[pd.DataFrame, pd.DataFrame, int]], _Counts]]] = []
         while counts.less_than(bif_max):
-            while len(tasks) < max_concurrent_sims:
+            while len(tasks) < max(1, pool._max_workers // 10):
                 tasks.append(
                     pool.submit(
                         _gen_data,
-                        pool,
                         counts,
                         ts_len,
                         bif_max,
+                        pool=pool,
                     )
                 )
             concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -792,11 +800,10 @@ def batch_and_save(
     batch_num: int, 
     ts_len: int, 
     bif_max: int, 
-    pool: Executor = _new_pool(),
-    max_concurrent_sims: int = DEFAULT_MAX_CONCURRENT_SIMS,
+    pool: Union[Executor, None, Callable[[], Executor]],
     ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:        
     import os.path
-    return save(os.path.join(path, f"batch{batch_num}"), lambda: batch(batch_num, ts_len, bif_max, pool, max_concurrent_sims))
+    return save(os.path.join(path, f"batch{batch_num}"), lambda: batch(batch_num, ts_len, bif_max, pool))
 
 # Returns combined (sims, resids, df_labels, df_groups)
 def combine(
@@ -811,24 +818,20 @@ def combine(
 def multibatch(
         path, 
         batch_pool: Executor, 
-        sim_pool: Executor, 
+        sim_pool: Union[Executor, None, Callable[[], Executor]], 
         batches: int, 
         ts_len: int, 
-        bif_max: int, 
-        max_concurrent_sims: int = DEFAULT_MAX_CONCURRENT_SIMS
+        bif_max: int,
     ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
         
     if batches <= 0:
         raise ValueError("Batches is less than or equal to 0!")
     
-    if max_concurrent_sims <= 0:
-        raise ValueError("Max concurrent sims is less than or equal to 0!")
-    
     if batches >= 1:
         import os.path
-        return save(os.path.join(path, "combined/"), lambda: reduce(combine, batch_pool.map(batch_and_save, [path] * batches), range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [sim_pool] * batches, [max_concurrent_sims] * batches))
+        return save(os.path.join(path, "combined/"), lambda: reduce(combine, batch_pool.map(batch_and_save, [path] * batches, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [sim_pool] * batches)))
     else:
-        return batch_and_save(path, batch_num=1, ts_len=ts_len, bif_max=bif_max, pool=sim_pool, max_concurrent_sims=max_concurrent_sims)
+        return batch_and_save(path, batch_num=1, ts_len=ts_len, bif_max=bif_max, pool=sim_pool)
     
 
 def save(path, generator: Callable[[], tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]]) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
@@ -866,7 +869,8 @@ def run_with_args():
     parser.add_argument('-s', '--max-concurrent-sims', type=int, default=DEFAULT_MAX_CONCURRENT_SIMS)
     args = parser.parse_args()
     
-    multibatch(path=args.output, batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
+    p = _new_pool()
+    multibatch(path=args.output, batch_pool=p, sim_pool=p, batches=args.batches, ts_len=args.length, bif_max=args.bifurcations)
     
 if __name__ == "__main__":
     run_with_args()
