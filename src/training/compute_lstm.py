@@ -22,7 +22,7 @@ from cfut import SlurmExecutor
 from concurrent.futures import Executor, ThreadPoolExecutor
 
 def default_batches():
-    slurm_batches: int | None = os.environ.get('SLURM_CPUS_PER_TASK')
+    slurm_batches: int | None = int(os.environ.get('SLURM_CPUS_PER_TASK'))
     if slurm_batches is not None:
         if slurm_batches > 1:
             slurm_batches -= 1

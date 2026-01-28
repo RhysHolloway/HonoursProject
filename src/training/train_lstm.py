@@ -305,7 +305,7 @@ def _gen_data(
                 if pars[par] != 0.0:
                     try:
                         yield _simulate(counts, par, pars, equi, rrate, ts_len, bif_max), None
-                    except e:
+                    except Exception as e:
                         yield None, e
         def cancel():
             pass
