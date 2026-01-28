@@ -274,47 +274,68 @@ def _gen_data(
         counts: _Counts,
         ts_len: int,
         bif_max: int,
+        batch_num: int,
         pool: Union[Executor, None] = None,
         simulations: list[tuple[pd.DataFrame, pd.DataFrame, int]] = [],
 ) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
+    
     pars, equi, rrate = _generate_simulation()
     
-    GENERATOR: lambda func: [func(par) for par in range(len(pars)) if pars[par] != 0.0]
-    
-    if pool is None:
-        while counts.less_than(bif_max):
-            new_sims, new_counts = GENERATOR(lambda par: _simulate(counts, par, pars, equi, rrate, ts_len, bif_max))
-            new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
-            simulations += new_sims
-            counts.add(new_counts)
-    else:
-        tasks = GENERATOR(lambda par: pool.submit(_simulate, counts, par, pars, equi, rrate, ts_len, bif_max))
-        for task in concurrent.futures.as_completed(tasks):
-            match task.exception():
-                case None:
-                    new_sims, new_counts = task.result()
-                    new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
-                    simulations += new_sims
-                    counts.add(new_counts)
-                    if not counts.less_than(bif_max):
-                        break
-                case ValueError("Jacobian inversion yielded zero vector. "
-                                "This indicates a bug in the Jacobian "
-                                "approximation."):
-                    pass
-                case e:
-                    match type(e):
-                        case nl.NoConvergence:
-                            for task in tasks:
-                                task.cancel()
-                            return _gen_data(counts, ts_len, bif_max, pool=pool, simulations=simulations)
-                        case concurrent.futures.CancelledError | builtins.UnboundLocalError:
-                            pass
-                        case _:
-                            _trace(e)
+    # Multithread the parameter simuations
+    def pool_funcs():
+        tasks = [pool.submit(_simulate, counts, par, pars, equi, rrate, ts_len, bif_max) for par in range(len(pars)) if pars[par] != 0.0]
+                
+        def cancel():
+            for task in tasks:
+                task.cancel()
         
-        for task in tasks:
-            task.cancel()
+        def generator():
+            for task in concurrent.futures.as_completed(tasks):
+                if task.exception() is not None:
+                    yield None, task.exception()
+                else:
+                    yield task.result(), None
+                
+        return generator, cancel
+        
+    # Run parameter simulations on a single thread
+    def none_funcs():
+        def generator():
+            for par in range(len(pars)):
+                if pars[par] != 0.0:
+                    try:
+                        yield _simulate(counts, par, pars, equi, rrate, ts_len, bif_max), None
+                    except e:
+                        yield None, e
+        def cancel():
+            pass
+        return generator, cancel
+        
+    generator, cancel = none_funcs() if pool is None else pool_funcs()
+
+    for result, exception in generator():
+        match exception:
+            case None:
+                new_sims, new_counts = result
+                new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
+                simulations += new_sims
+                counts.add(new_counts)
+                if not counts.less_than(bif_max):
+                    break
+            case ValueError("Jacobian inversion yielded zero vector. "
+                            "This indicates a bug in the Jacobian "
+                            "approximation."):
+                pass
+            case e:
+                match type(e):
+                    case nl.NoConvergence:
+                        cancel()
+                        return _gen_data(counts, ts_len, bif_max, batch_num=batch_num, pool=pool, simulations=simulations)
+                    case concurrent.futures.CancelledError | builtins.UnboundLocalError:
+                        pass
+                    case _:
+                        _trace(e)
+    cancel()
         
     return simulations
 
@@ -747,28 +768,33 @@ def batch(
     
     if pool is None:
         while counts.less_than(bif_max):
+            print("Batch", batch_num, "- starting simulation", len(simulations))
             simulations.append(
                 _gen_data(
                     counts,
                     ts_len,
                     bif_max,
+                    batch_num=batch_num,
                     pool=None,
                 )
             )
+            print("Batch", batch_num, "- completed simulation", len(simulations), "- now at", counts.total(), "bifurcations")
     else:
         
-        if pool is Callable:
+        if callable(pool):
             pool = pool()
         
         tasks: list[Future[Tuple[list[Tuple[pd.DataFrame, pd.DataFrame, int]], _Counts]]] = []
         while counts.less_than(bif_max):
             while len(tasks) < max(1, pool._max_workers // 10):
+                print("Batch", batch_num, "- starting simulation", len(simulations))
                 tasks.append(
                     pool.submit(
                         _gen_data,
                         counts,
                         ts_len,
                         bif_max,
+                        batch_num=batch_num,
                         pool=pool,
                     )
                 )
@@ -827,7 +853,7 @@ def multibatch(
     if batches <= 0:
         raise ValueError("Batches is less than or equal to 0!")
     
-    if batches >= 1:
+    if batches > 1:
         import os.path
         return save(os.path.join(path, "combined/"), lambda: reduce(combine, batch_pool.map(batch_and_save, [path] * batches, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [sim_pool] * batches)))
     else:
