@@ -322,12 +322,12 @@ def _gen_data(
                 counts.add(new_counts)
                 if not counts.less_than(bif_max):
                     break
-            case ValueError("Jacobian inversion yielded zero vector. "
-                            "This indicates a bug in the Jacobian "
-                            "approximation."):
-                pass
             case e:
                 match type(e):
+                    case builtins.ValueError:
+                        if "Jacobian inversion yielded zero vector." in str(e):
+                            cancel()
+                            return _gen_data(counts, ts_len, bif_max, batch_num=batch_num, pool=pool, simulations=simulations) 
                     case nl.NoConvergence:
                         cancel()
                         return _gen_data(counts, ts_len, bif_max, batch_num=batch_num, pool=pool, simulations=simulations)
