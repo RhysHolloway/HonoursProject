@@ -1,5 +1,6 @@
 from typing import Callable, Self, Sequence, Tuple
 from matplotlib.figure import Figure
+import numpy as np
 import pandas as pd
 import time
 from util import get_project_path, join_path
@@ -63,8 +64,14 @@ class Dataset:
         self.df = df()
         self.df = transform(self.df, age_col, feature_cols)
         self.df = prepare_df(self.df, age_col, feature_cols)
-        if age_scale != 1:
-            self.df[age_col] = self.df[age_col].multiply(age_scale)
+        # if age_scale != 1:
+        #     self.df[age_col] = self.df[age_col].multiply(age_scale)
+            
+        match np.log10(max(self.ages()) * age_scale) // 3:
+            case 0: self._age_format = "ya",
+            case 1: self._age_format = "kya",
+            case 2: self._age_format = "mya",
+            case _: self._age_format = "?ya",
         
         self.age_col = age_col
         self.feature_cols = feature_cols
@@ -74,6 +81,9 @@ class Dataset:
         
     def features(self):
         return self.df[self.feature_cols].values
+    
+    def age_format(self) -> str:
+        return self._age_format
 
 class Model(metaclass = abc.ABCMeta):
     

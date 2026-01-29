@@ -174,14 +174,14 @@ class HMM(Model):
                 for idx, state in accepted:
                     print(f"Age {ages[idx]:.2f} with posterior value {posterior[idx, state]:.2f}")
 
-        def plot_single(result) -> Figure:
+        def plot_single(result: tuple[Dataset, Any, int, float, np.ndarray]) -> Figure:
             dataset, model, n_regimes, bic, posterior, accepted = result
             ages = dataset.ages()
             fig = plt.figure()
             axs = fig.subplots()
             axs.set_title(f"HMM {dataset.name}")
             axs.set_ylabel("Posterior probability")
-            axs.set_xlabel(f"Age")
+            axs.set_xlabel(f"Age ({dataset.age_format()})")
             for k in range(posterior.shape[1]):
                 axs.plot(ages, posterior[:, k], label=f"P(state={k})")
             for a, state in accepted:

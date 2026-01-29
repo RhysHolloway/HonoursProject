@@ -8,3 +8,4 @@ pandas==2.3.3
 scikit-learn==1.8.0
 ewstools==2.1.2
 ruptures==1.1.10
+hmmlearn==0.3.3
