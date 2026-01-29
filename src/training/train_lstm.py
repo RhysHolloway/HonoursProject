@@ -31,12 +31,14 @@ import atomics
 import numpy as np
 import ruptures
 from functools import reduce
-from typing import Callable, Final, Union
+from typing import Callable, Final, Literal, Union
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
 from concurrent.futures import Executor, Future
 import scipy.optimize._nonlin as nl
+
+BifType = Tuple[Literal["BP", "LP", "HB"], bool]
 
 def _generate_simulation(
     # Define convergence threshold
@@ -226,8 +228,23 @@ class _LocalCounts:
     null_h_count=0
     null_f_count=0
     null_b_count=0
+    
+    def get(type: BifType) -> str:
+        match type:
+            case ("HB", True):
+                return "null_h_count"
+            case ("LP", True):
+                return "null_f_count"
+            case ("BP", True):
+                return "null_b_count"
+            case ("HB", False):
+                return "hopf_count"
+            case ("LP", False):
+                return "fold_count"
+            case ("BP", False):
+                return "branch_count"
 
-class _Counts:
+class BifCounts:
     hopf_count=atomics.atomic(width=4, atype=atomics.INT)
     fold_count=atomics.atomic(width=4, atype=atomics.INT)
     branch_count=atomics.atomic(width=4, atype=atomics.INT)
@@ -255,6 +272,22 @@ class _Counts:
         self.null_h_count.add(other.null_h_count)
         self.null_f_count.add(other.null_f_count)
         self.null_b_count.add(other.null_b_count)
+        
+    def get(self, type: BifType) -> atomics.INT:
+        match type:
+            case ("HB", True):
+                return self.null_h_count
+            case ("LP", True):
+                return self.null_f_count
+            case ("BP", True):
+                return self.null_b_count
+            case ("HB", False):
+                return self.hopf_count
+            case ("LP", False):
+                return self.fold_count
+            case ("BP", False):
+                return self.branch_count
+        
 
 
 SOLVER_PARAMETERS: Final[dict] = {
@@ -271,7 +304,7 @@ def _trace(e: BaseException):
     print(traceback.format_exception(type(e), e, e.__traceback__), file=sys.stderr, flush=True)
 
 def _gen_data(
-        counts: _Counts,
+        counts: BifCounts,
         ts_len: int,
         bif_max: int,
         batch_num: int,
@@ -316,10 +349,10 @@ def _gen_data(
     for result, exception in generator():
         match exception:
             case None:
-                new_sims, new_counts = result
+                new_sims, newBifCounts = result
                 new_sims = [(s, r, l) for s, r, (attr, max, l) in new_sims if getattr(counts, attr).load() < max]
                 simulations += new_sims
-                counts.add(new_counts)
+                counts.add(newBifCounts)
                 if not counts.less_than(bif_max):
                     break
             case e:
@@ -379,7 +412,7 @@ def _gen_branches_py(
     } for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in ALLOWED_BIFS]      
 
 def _simulate(
-        prev_counts: _Counts,
+        prev_counts: BifCounts,
         par: int,
         pars: np.ndarray[np.float64],
         equi: np.ndarray[np.float64],
@@ -432,11 +465,12 @@ def _simulate(
         # Pick sample spacing randomly from [0.1,0.2,...,1]
         dt_sample = np.random.choice(np.arange(1,11)/10)
         
-        def sim(type: str, attr: str, max: int, null_sim: bool, label: int) -> bool:
+        def sim(bif_type: BifType, max: int) -> bool:
+            attr = _LocalCounts.get(bif_type)
             local_count = getattr(counts, attr)
-            if  model['type'] == type and (getattr(prev_counts, attr).load() + local_count) < max:
+            if  model['type'] == bif_type[0] and (prev_counts.get(bif_type).load() + local_count) < max:
                 df_out = _sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
-                            sigma=sigma, null_sim=null_sim)
+                            sigma=sigma, null_sim=bif_type[1])
                 if df_out is None:
                     return False
                 trans_time = _trans_detect(df_out)
@@ -452,18 +486,18 @@ def _simulate(
                         df_cut[['x']], 
                         # Residuals
                         _compute_resid(df_cut['x']),
-                        (attr, max, label),
+                        (max, bif_type),
                     ))
                     setattr(counts, attr, local_count + 1)
                     return True
             return False
 
-        sim('HB', 'null_h_count', bif_max // 3, True, 3)
-        sim('LP', 'null_f_count', bif_max//3, True, 3)
-        sim('BP', 'null_b_count', bif_max-2*(bif_max//3), True, 3)
-        sim('HB', 'hopf_count', bif_max, False, 1)
-        sim('LP', 'fold_count', bif_max, False, 0)
-        sim('BP', 'branch_count', bif_max, False, 2)
+        sim(('HB', True), bif_max // 3)
+        sim(('LP', True),  bif_max//3)
+        sim(('BP', True), bif_max-2*(bif_max//3))
+        sim(('HB', False), bif_max)
+        sim(('LP', False), bif_max)
+        sim(('BP', False), bif_max)
     
     return sims, counts
     
@@ -653,8 +687,8 @@ def _trans_detect(df_in):
     return out
 
 def _to_traindata(
-    counts: _Counts,
-    simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, int]]]
+    counts: BifCounts,
+    simulations: list[list[tuple[pd.DataFrame, pd.DataFrame, BifType]]]
 ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
     
     bif_total = counts.total()
@@ -676,9 +710,9 @@ def _to_traindata(
     #-----------------------------
 
     df_labels: pd.DataFrame = pd.DataFrame(
-        ((i, label) 
+        ((i, _num_from_label(label), label[0], label[1])
         for i, run in enumerate(simulations)
-        for _,_,label in run), columns = ['sequence_ID', 'class_label']
+        for _,_,label in run), columns = ['sequence_ID', 'class_label', 'bif', 'null']
     )
 
     #----------------------------
@@ -738,6 +772,7 @@ from typing import Tuple
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+import os.path
 
 DEFAULT_MAX_CONCURRENT_SIMS: Final[int] = 3
 
@@ -753,23 +788,59 @@ def _new_pool():
     
     return pool
 
+def _num_from_label(t: BifType) -> int:
+    if t[1]:
+        return 3
+    else:
+        match t[0]:
+            case "LP":
+                return 0
+            case "HB":
+                return 1
+            case "BP":
+                return 2
+
 def batch(
     batch_num: int, 
     ts_len: int, 
     bif_max: int, 
+    counts: BifCounts = BifCounts(),
     pool: Union[Executor, None, Callable[[], Executor]] = _new_pool(),
+    path: Union[None, str] = None,
     ) -> Tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
     
-    print("Start batch", batch_num)    
+    print("Start batch", batch_num)
     
-    counts = _Counts()
+    simulations: list[Tuple[pd.DataFrame, pd.DataFrame, str]] = []
     
-    simulations: list[list[Tuple[pd.DataFrame, pd.DataFrame, int]]] = []
+    # Continue from previous state
+    label_file = None
+    if path is not None:
+        with open(os.path.join(path, "labels.csv")) as l:
+            labels = pd.read_csv(l)
+            simulations += [(
+                pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
+                pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
+                _num_from_label((bif, null))
+                ) for seq_id, bif, null in labels[['sequence_ID', 'bif', 'null']]]
+            for b, n in labels[['bif', 'null']]:
+                counts.get((b, n)).inc()
+            label_file = l
+       
+    def add_simulation(results: list[Tuple[pd.DataFrame, pd.DataFrame, BifType]]):
+        simulations += results
+        if label_file is not None:
+            l = len(simulations) - len(results) + 1
+            for i, result in enumerate(results):
+                result[0].to_csv(os.path.join(path, f"output_sims/tseries{l + i}.csv"))
+                result[1].to_csv(os.path.join(path, f"output_resids/resids{l + i}.csv"))
+                t = result[2]
+                label_file.write(f"{l + i},{_num_from_label(t)},{t[0]},{t[1]}\n")
     
     if pool is None:
         while counts.less_than(bif_max):
             print("Batch", batch_num, "- starting simulation", len(simulations))
-            simulations.append(
+            add_simulation(
                 _gen_data(
                     counts,
                     ts_len,
@@ -784,7 +855,7 @@ def batch(
         if callable(pool):
             pool = pool()
         
-        tasks: list[Future[Tuple[list[Tuple[pd.DataFrame, pd.DataFrame, int]], _Counts]]] = []
+        tasks: list[Future[Tuple[list[Tuple[pd.DataFrame, pd.DataFrame, int]], BifCounts]]] = []
         while counts.less_than(bif_max):
             while len(tasks) < max(1, pool._max_workers // 10):
                 print("Batch", batch_num, "- starting simulation", len(simulations))
@@ -804,7 +875,7 @@ def batch(
                     match task.exception():
                         case None:
                             tasks.remove(task)
-                            simulations.append(task.result())
+                            add_simulation(task.result())
                             print("Batch", batch_num, "- completed simulation", len(simulations), "- now at", counts.total(), "bifurcations")
                         case e:
                             match type(e):
@@ -820,16 +891,6 @@ def batch(
     
     print("Finished batch", batch_num)    
     return tuple
-
-def batch_and_save(
-    path,
-    batch_num: int, 
-    ts_len: int, 
-    bif_max: int, 
-    pool: Union[Executor, None, Callable[[], Executor]],
-    ) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:        
-    import os.path
-    return save(os.path.join(path, f"batch{batch_num}"), lambda: batch(batch_num, ts_len, bif_max, pool))
 
 # Returns combined (sims, resids, df_labels, df_groups)
 def combine(
@@ -853,17 +914,22 @@ def multibatch(
     if batches <= 0:
         raise ValueError("Batches is less than or equal to 0!")
     
+    import os.path
+    next_batch = 1
+    
+    while os.path.exists(os.path.join(path, f"batch{next_batch}/")):
+        next_batch += 1
+    
     if batches > 1:
-        import os.path
-        return save(os.path.join(path, "combined/"), lambda: reduce(combine, batch_pool.map(batch_and_save, [path] * batches, range(1, batches + 1), [ts_len] * batches, [bif_max] * batches, [sim_pool] * batches)))
+        return save(os.path.join(path, "combined/"), lambda: reduce(combine, batch_pool.map(batch, range(next_batch, batches + next_batch), [ts_len] * batches, [bif_max] * batches, [sim_pool] * batches, [path] * batches)))
     else:
-        return batch_and_save(path, batch_num=1, ts_len=ts_len, bif_max=bif_max, pool=sim_pool)
+        return batch(path, batch_num=next_batch, ts_len=ts_len, bif_max=bif_max, pool=sim_pool, path=path)
     
 
-def save(path, generator: Callable[[], tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]]) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+def save(path, generator: Callable[[BifCounts], tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]]) -> tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]:
     import os.path
     
-    os.makedirs(path, exist_ok=False)
+    os.makedirs(path, exist_ok=True)
     
     sims, resids, labels, groups = generator()
     
