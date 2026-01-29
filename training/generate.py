@@ -14,6 +14,7 @@ Made to run using only one file, multithreaded, and without AUTO-07p
 import abc
 import builtins
 import copy
+import typing
 import atomics
 import numpy as np
 import ruptures
@@ -26,9 +27,11 @@ from concurrent.futures import Executor, Future
 import scipy.optimize._nonlin as nl
 import pycont
 
-BifType = Tuple[Literal["BP", "LP", "HB"], bool]
+BifId = Literal["BP", "LP", "HB"]
 
-BIFS: Final[list[Literal["BP", "LP", "HB"]]] = ["HB", "LP", "BP"]
+BifType = Tuple[BifId, bool]
+
+BIFS: Final[list[BifId]] = list(typing.get_args(BifId))
 
 def bif_types():
     for null in [True, False]:
@@ -265,8 +268,6 @@ def _gen_data(
         simulations: _Simulations = [],
 ) -> list[tuple[pd.DataFrame, pd.DataFrame, BifType]]:
     
-    pars, equi, rrate = _generate_simulation()
-    
     # Multithread the parameter simuations
     def pool_funcs():
         tasks = [pool.submit(_simulate, par, pars, equi, rrate, ts_len, bif_max, counts) for par in range(len(pars)) if pars[par] != 0.0]
@@ -294,6 +295,8 @@ def _gen_data(
         def cancel():
             pass
         return generator, cancel
+    
+    pars, equi, rrate = _generate_simulation()
         
     generator, cancel = none_funcs() if pool is None else pool_funcs()
 
@@ -726,9 +729,6 @@ def _to_traindata(
 
 ################################################################################
 
-import logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 import os.path
 import os
 
@@ -767,45 +767,7 @@ def batch(
     path: Union[None, str] = None,
     ) -> _TrainData:
     
-    print("Batch", batch_num, "start")
-    
-    simulations: _Simulations = []
-    counts = _AtomicCounts()
-    
-    # Continue from previous state
-    label_file = None
-    if path is not None:
-        path = os.path.join(path, f"batch{batch_num}/")
-        os.makedirs(path, exist_ok=True)
-        os.makedirs(os.path.join(path, f"output_sims/"), exist_ok=True)
-        os.makedirs(os.path.join(path, f"output_resids/"), exist_ok=True)
-        try:
-            labels_path = os.path.join(path, "labels.csv")
-            
-            if not os.path.exists(labels_path):
-                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path, index=False)
-            
-            labels = pd.read_csv(labels_path)
-            
-            for seq_id, bif, null in labels[['sequence_ID', 'bif', 'null']].itertuples(index=False, name=None):
-                type: BifType = (bif, null)
-                counts.get(type).inc()
-                simulations.append((
-                    pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
-                    pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
-                    _num_from_label((bif, null))
-                ))
-                
-            if len(simulations) > 0:
-                # ts_len is same between previous iterations and now
-                assert simulations[0][0].shape[0] == ts_len
-                          
-            label_file = open(labels_path, "a+")
-                
-        except Exception as e:
-            print("Could not open label file with error:", e)
-            
-    def pool_generator(pool: Executor = pool() if callable(pool) else pool):
+    def pool_generator(pool: Executor):
         tasks: list[Future[_Simulations]] = []
         while counts < bif_max:
             while len(tasks) < max_task_count(tasks) // 10:
@@ -843,8 +805,50 @@ def batch(
                     pool=None,
                 )
     
-    generator = single_generator if pool is None or max_task_count(pool) // 10 == 0 else pool_generator
-    for results in generator():
+    print("Batch", batch_num, "start")
+    
+    pool = pool() if callable(pool) else pool
+    
+    simulations: _Simulations = []
+    counts = _AtomicCounts()
+    
+    # Continue from previous state
+    label_file = None
+    if path is not None:
+        path = os.path.join(path, f"batch{batch_num}/")
+        os.makedirs(path, exist_ok=True)
+        os.makedirs(os.path.join(path, f"output_sims/"), exist_ok=True)
+        os.makedirs(os.path.join(path, f"output_resids/"), exist_ok=True)
+        try:
+            labels_path = os.path.join(path, "labels.csv")
+            
+            if not os.path.exists(labels_path):
+                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path, index=False)
+            
+            labels = pd.read_csv(labels_path)
+            
+            for seq_id, bif, null in labels[['sequence_ID', 'bif', 'null']].itertuples(index=False, name=None):
+                type: BifType = (bif, null)
+                counts.get(type).inc()
+                simulations.append((
+                    pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
+                    pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
+                    _num_from_label((bif, null))
+                ))
+                
+            if len(simulations) > 0:
+                # ts_len is same between previous iterations and now
+                assert simulations[0][0].shape[0] == ts_len
+                          
+            label_file = open(labels_path, "a+")
+                
+        except Exception as e:
+            print("Could not open label file with error:", e)
+            
+    print("Batch", batch_num, "loaded", len(simulations), "previous simulations")
+    
+    generator = single_generator() if pool is None or max_task_count(pool) // 10 == 0 else pool_generator(pool)
+    for results in generator:
         print("Batch", batch_num, "-", counts)
         update = False
         for i, result in enumerate(results):
