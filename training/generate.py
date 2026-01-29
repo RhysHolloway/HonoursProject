@@ -19,7 +19,7 @@ import atomics
 import numpy as np
 import ruptures
 from functools import reduce
-from typing import Callable, Final, Iterable, Literal, Self, Union, Tuple
+from typing import Callable, Final, Iterable, Literal, Self, Sequence, Union, Tuple
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
@@ -891,7 +891,7 @@ def combine(batches: Iterable[_TrainData]) -> _TrainData:
 # Returns (list(sims, resids), labels, groups)
 def multibatch(
         sim_pool: Union[Executor, None, Callable[[], Executor]], 
-        batches: int, 
+        batches: Sequence[int], 
         ts_len: int, 
         bif_max: int,
         batch_pool: Executor, 
@@ -899,20 +899,20 @@ def multibatch(
         path: Union[str, None] = None, 
     ) -> _TrainData:
         
-    if batches <= 0:
-        raise ValueError("Batches is less than or equal to 0!")
+    if any(b <= 0 for b in batches):
+        raise ValueError("Input batch numbers contains a value less than or equal to 0!")
     
     combiner = lambda: combine(
             batch_pool.map(
                 batch, 
-                range(1, batches + 1), 
-                [ts_len] * batches, 
-                [bif_max] * batches, 
-                [sim_pool] * batches, 
-                [max_task_count] * batches,
-                [path] * batches,
+                batches, 
+                [ts_len] * len(batches), 
+                [bif_max] * len(batches), 
+                [sim_pool] * len(batches), 
+                [max_task_count] * len(batches),
+                [path] * len(batches),
             )
-        ) if batches > 1 else lambda: combine([batch(
+        ) if len(batches) > 1 else lambda: combine([batch(
             batch_num=1,
             ts_len=ts_len, 
             bif_max=bif_max, 
@@ -956,12 +956,13 @@ def run_with_args(max_task_count: Callable[[Executor], int] = _max_task_count):
                     description='Generates training data')
     parser.add_argument('output', type=str)
     parser.add_argument('-b', '--batches', type=int)
+    parser.add_argument('-s', '--batch-start', type=int, default=1)
     parser.add_argument('-l', '--length', type=int)
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
     args = parser.parse_args()
     
     p = _new_pool()
-    multibatch(batch_pool=p, sim_pool=_new_sim_pool, batches=args.batches, ts_len=args.length, bif_max=args.bifurcations, max_task_count=max_task_count, path=args.output)
+    multibatch(batch_pool=p, sim_pool=_new_sim_pool, batches=list(range(args.batch_start, args.batch_start + args.batches)), ts_len=args.length, bif_max=args.bifurcations, max_task_count=max_task_count, path=args.output)
     
 if __name__ == "__main__":
     run_with_args()
