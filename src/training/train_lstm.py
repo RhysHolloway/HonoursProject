@@ -830,7 +830,7 @@ def batch(
             labels_path = os.path.join(path, "labels.csv")
             
             if not os.path.exists(labels_path):
-                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path)
+                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path, index=False)
                 
             label_file = open(labels_path, "r+")
             
