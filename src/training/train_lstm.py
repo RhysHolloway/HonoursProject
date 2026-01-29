@@ -31,7 +31,7 @@ import atomics
 import numpy as np
 import ruptures
 from functools import reduce
-from typing import Callable, Final, Literal, Union
+from typing import Callable, Final, Literal, Union, Tuple
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
@@ -768,7 +768,6 @@ def _compute_resids(dfs: list[pd.DataFrame]) -> list[pd.DataFrame]:
 
 ################################################################################
 
-from typing import Tuple
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
