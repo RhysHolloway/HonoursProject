@@ -647,17 +647,27 @@ def _to_traindata(
     
     bif_total = counts.total()
     
+    sims: list[pd.DataFrame]
+    resids: list[pd.DataFrame]
+    labels: list[BifType]
     sims, resids, labels = zip(*simulations)
-    simsresids = list(zip(sims, resids))
-    
     
     # Truncate data to bif_max
     for type in bif_types():
-        type_labels = labels.loc[labels[['bif', 'null'] == type]]
         max = bif_maximum(type, bif_max=bif_max)
-        if max > len(type_labels):
-            removals = type_labels.iloc[max:]['sequence_id']
-            simsresids = [v for i, v in enumerate(zip(simsresids)) if (i + 1) not in removals]
+        count = 0
+        i = 0
+        while i < len(labels):
+            if labels[i] == type:
+                if count < max:
+                    count+=1
+                    i+=1
+                else:
+                    labels.pop(i)
+                    sims.pop(i)
+                    resids.pop(i)
+            else:
+                i+=1
         
     #----------------------------
     # Convert label files into single csv file
@@ -712,7 +722,7 @@ def _to_traindata(
     # Sort rows by sequence_ID
     df_groups.sort_values(by=['sequence_ID'], inplace=True)
     
-    return simsresids, df_labels, df_groups, counts
+    return list(zip(sims, resids)), df_labels, df_groups, counts
 
 ################################################################################
 
