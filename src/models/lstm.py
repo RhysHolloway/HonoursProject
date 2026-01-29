@@ -1,95 +1,41 @@
 import os
-from typing import Union, Callable, Any
+from typing import Self, Union, Callable, Any
+import keras
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 
 from scipy.signal import find_peaks
-from util import filter_points, get_project_path, resample_df
-from wrapper import Dataset, Model
-from tensorflow.keras.models import load_model
+from util import filter_points, get_project_path
+from processing import Dataset, Model
+from keras.models import load_model, Sequential
 import ewstools
 
-# def train_lstm_from_data(
-#     data,
-#     seq_len: int,
-#     train: Union[int, float],
-#     epochs: int,
-#     patience: int = 30,
-#     batch_size: int = 32,
-#     kernel_initializer: str = 'lecun_normal',
-#     optimizer: Optimizer = Adam(learning_rate = 0.0005),
-# ):
-
-#     if float(train) <= 0.0:
-#         raise ValueError("Negative or zero training value provided!")
+class LSTMModels:
     
-#     n_train: int = int(min(train, 1.0) * len(ages)) if isinstance(train, float) else max(int(train), len(ages))
-
-#     Y_train, X_train = ages[:n_train], seq_features[:n_train].reshape(n_train, features.shape[1], 1)
+    def __init__(self: Self, path: str, extension: str = ".h5"):
+        root_path = get_project_path(path)
+        self._500models = [load_model(root_path + "len500/" + name) for name in os.listdir(root_path + "len500/") if name.endswith(extension)]
+        self._1500models = [load_model(root_path + "len1500/" + name) for name in os.listdir(root_path + "len1500/") if name.endswith(extension)]
     
-#     Y_val, X_val = ages[n_train:], seq_features[n_train:].reshape(-1, features.shape[1], 1)
+    def get_models(self: Self, series: pd.Series):
+        return self._1500models if len(series) > 500 else self._500models
     
-#     model = Sequential([
-#         Input(shape=(features.shape[1], 1)),
-#         Conv1D(
-#             filters=50, 
-#             kernel_size=12,
-#             padding="same",
-#             activation="relu",
-#             kernel_initializer=kernel_initializer,
-#         ),
-#         Dropout(0.1),
-#         MaxPooling1D(pool_size = 2),
-#         LSTM(50, return_sequences=True, kernel_initializer = kernel_initializer),
-#         Dropout(0.1),
-#         LSTM(10, kernel_initializer = kernel_initializer),
-#         Dense(4, activation='softmax', kernel_initializer = kernel_initializer)
-#     ])
-
-#     model.compile(
-#         loss=SparseCategoricalCrossentropy(), 
-#         optimizer=optimizer, 
-#         metrics=['accuracy']
-#     )
-    
-#     history = model.fit(
-#         x=X_train,
-#         y=Y_train,
-#         epochs=epochs,
-#         batch_size=batch_size,
-#         callbacks=[EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)],
-#         validation_data=(X_val, Y_val),
-#         verbose=True,
-#     )
 
 # Make sure to do linear interpolation before using
-class BuryLSTM:
-    
-    def __init__(self):
-        root_path = get_project_path("env/deep-early-warnings-pnas/dl_train/best_models_tf215/")
-        self.__500models = [load_model(root_path + "len500/" + name) for name in os.listdir(root_path + "len500/") if name[-6:] == ".keras"]
-        self.__1500models = [load_model(root_path + "len1500/" + name) for name in os.listdir(root_path + "len1500/") if name[-6:] == ".keras"]
-        
-    def with_args(
-        thresholds: list[float] = [0.9],
-        prominence: float = 0.05,
-        distance: int = 10,
-    ):
-        return LSTMWithModel(lambda series: self.__1500models if len(series) > 500 else self.__500models)
-    
-class LSTMWithModel(Model):
+
+class LSTM(Model):
         
     def __init__(
         self,
-        get_models_for_series: Callable[[Any], list],
+        get_models: Callable[[Any], list[Sequential]],
         thresholds: list[float],
         prominence: float,
         distance: int,
         ):
         super().__init__("CNN-LSTM")
         
-        self.get_models_for_series = get_models_for_series
+        self.get_models = get_models
         self.thresholds = thresholds
         self.prominence = prominence
         self.distance = distance
@@ -149,7 +95,7 @@ class LSTMWithModel(Model):
         dt = series.index[1] - series.index[0]
         inc = dt * 10
         
-        classifier_list = self.get_models_for_series(series)
+        classifier_list = self.get_models(series)
         
         for i, classifier in enumerate(classifier_list):
             ts.apply_classifier_inc(classifier, inc=inc, verbose=1, name=str(i))
@@ -183,7 +129,7 @@ class LSTMWithModel(Model):
         points = [find_peaks_in_col(col, ts.dl_preds["Time"]) for col in ts.dl_preds[[0,1,2]]]
         
         return (
-            dl_preds, dl_preds_mean, points
+            ts.dl_preds, dl_preds_mean, points
         )
         
         
@@ -206,7 +152,7 @@ class LSTMWithModel(Model):
         def plot_single(tup: tuple):
             dataset, (preds, means, points) = tup
                     
-            fig = pyplot.figure(4, 12, sharex = True)
+            fig = plt.figure(4, 12, sharex = True)
             fig.suptitle(f"Bifurcation classifications on {dataset.name}")
             subplots = fig.subplots(nrows=4, ncols=1, sharex=True)
             for i, ax in enumerate(subplots):
@@ -218,7 +164,7 @@ class LSTMWithModel(Model):
                 if i != 3:
                     ax.scatter(points, preds["Time"])
                 
-                for threshold in thresholds:
+                for threshold in self.thresholds:
                     ax.axhline(threshold, linestyle="--")
 
             return fig

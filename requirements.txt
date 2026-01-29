@@ -1,6 +1,10 @@
-hmmlearn==0.3.3
+matplotlib==3.10.8
 openpyxl==3.1.5
+atomics==1.0.3
+pycont-lite==0.6.0
 pybats==0.0.5
 tensorflow==2.20.0
-pycont-lite==0.6.0
-atomics==1.0.3
+pandas>=2.2.3,<3.0
+scikit-learn>=1.6.1,<2.0
+ewstools==2.1.2
+ruptures==1.1.10

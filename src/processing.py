@@ -1,7 +1,6 @@
-from typing import Any, Callable, Union
+from typing import Callable, Self, Sequence, Tuple
 from matplotlib.figure import Figure
 import pandas as pd
-import matplotlib.pyplot as plt
 import time
 from util import get_project_path, join_path
 import abc
@@ -9,15 +8,17 @@ import abc
 OUTPUT_PATH = get_project_path("output/plots/")
 PRINT, PLOT = True, True
 
+type _Col = str | Sequence[str]
+
 class Dataset:
     
     def __init__(
         self, 
         name: str, 
         df: Callable[[], pd.DataFrame],
-        age_col: Any,
-        feature_cols: list,
-        transform: Callable[[pd.DataFrame, Any, Any], pd.DataFrame] = lambda df, age_col, feature_cols : df, # Transform the input data
+        age_col: _Col,
+        feature_cols: _Col,
+        transform: Callable[[pd.DataFrame, _Col, _Col], pd.DataFrame] = lambda df, age_col, feature_cols : df, # Transform the input data
         age_scale: int = 1,
     ):
         self.name = name
@@ -25,8 +26,8 @@ class Dataset:
         # Clean up data frame before transforming
         def prepare_df(
             df: pd.DataFrame,
-            age_col,
-            feature_cols: list,
+            age_col: _Col,
+            feature_cols: _Col,
         ) -> pd.DataFrame:
             
             # Select relevant columns and ensure age is present
@@ -76,11 +77,11 @@ class Dataset:
 
 class Model(metaclass = abc.ABCMeta):
     
-    def __init__(self, name: str):
+    def __init__(self: Self, name: str):
         self.name = name
         
     @abc.abstractmethod
-    def runner(self, data: list[Dataset]) -> tuple[Callable[[], None], Callable[[], list[Figure]]]:
+    def runner(self, data: list[Dataset]) -> tuple[Callable[[], None], Callable[[], Sequence[Tuple[Dataset, Figure]]]]:
         pass
     
     def run(self, data: list[Dataset]):
@@ -92,16 +93,16 @@ class Model(metaclass = abc.ABCMeta):
         start = time.time()
         # Run the user-specified model(s) given to the parent function
         print_results, plot_results = self.runner(data)
-        print(f"###### {self.name} completed in {time.time() - start:.2f}s")        
+        print(f"###### {self.name} completed in {time.strftime("%Hh%Mm%Ss", time.gmtime(time.time() - start))}")
         print()
         
         if PRINT:
-            print(f"###### Retrieved results for {self.name}:")
+            print(f"###### Results for {self.name}:")
             print_results()
             print()
         
         if PLOT:
-            fig = plot_results()
-            fig.savefig(join_path(OUTPUT_PATH, f"{self.name} {[d.name.split(" ")[0] for d in data]}.png"))
+            for d, fig in plot_results():
+                fig.savefig(join_path(OUTPUT_PATH, f"{self.name} {d.name.split(" ")[0]}.png"))
             
         print()

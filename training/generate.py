@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Created on Wed Jan 28 15:24:37 2026
 
-Modified script made to run using only one file
+Modified training data generation script for the tipping point-detecting deep learning model created by Thomas Bury
+
+Made to run using only one file, multithreaded, and without AUTO-07p
 
 @author: Rhys Holloway, Thomas Bury
-
-"""
-
-"""
-Created on Mon Jul 15 15:24:37 2019
-
-@author: Thomas Bury
-
-Script to generate dynamical systems with random parameters and a stable equi:
-    Generate random parameters
-    Simulate dyanmical system
-    Check convergence
-    If yes, output parameters and equilibrium
-    
-    Dynamical system
-    dx/dt = a1 + a2 x + a3 y + a4 x^2 + a5 xy + a6 y^2 + a7 x^3 + a8 x^2 y + a9 x y^2 + a10 y^3
-    dy/dt = b1 + b2 x + b3 y + b4 x^2 + b5 xy + b6 y^2 + b7 x^3 + b8 x^2 y + b9 x y^2 + b10 y^3
-    
 
 """
 
@@ -37,6 +22,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
 from concurrent.futures import Executor, Future
 import scipy.optimize._nonlin as nl
+import pycont
 
 BifType = Tuple[Literal["BP", "LP", "HB"], bool]
 
@@ -60,6 +46,25 @@ def _generate_simulation(
     # Set a proportion (chosen randomly) of the parameters to zero.
     sparsity=0.5
     ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64], np.float64]:
+    
+    """
+    Created on Mon Jul 15 15:24:37 2019
+
+    @author: Thomas Bury
+
+    Script to generate dynamical systems with random parameters and a stable equi:
+        Generate random parameters
+        Simulate dyanmical system
+        Check convergence
+        If yes, output parameters and equilibrium
+        
+        Dynamical system
+        dx/dt = a1 + a2 x + a3 y + a4 x^2 + a5 xy + a6 y^2 + a7 x^3 + a8 x^2 y + a9 x y^2 + a10 y^3
+        dy/dt = b1 + b2 x + b3 y + b4 x^2 + b5 xy + b6 y^2 + b7 x^3 + b8 x^2 y + b9 x y^2 + b10 y^3
+        
+
+    """
+    
     # Stop when system with convergence found
     while True:
         
@@ -360,7 +365,6 @@ def _gen_branches_py(
         equi: np.ndarray[np.float64],
         steps: int = 500,
     ) -> list[dict]:
-    import pycont
     initial = pars[par]
     
     def G(u: np.ndarray[np.float64], p: np.float64, pars: np.ndarray[np.float64] = pars.copy()):
@@ -755,9 +759,6 @@ import os.path
 import os
 
 
-DEFAULT_MAX_CONCURRENT_SIMS: Final[int] = 3
-
-
 def _new_pool():
     pool = concurrent.futures.ProcessPoolExecutor()
         
@@ -910,8 +911,6 @@ def multibatch(
     if batches <= 0:
         raise ValueError("Batches is less than or equal to 0!")
     
-    import os.path
-    
     if batches > 1:
         return save(os.path.join(path, "combined/"), lambda: reduce(
             combine, 
@@ -971,7 +970,6 @@ def run_with_args(max_task_count: Callable[[Executor], int] = _max_task_count):
     parser.add_argument('-b', '--batches', type=int)
     parser.add_argument('-l', '--length', type=int)
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
-    parser.add_argument('-s', '--max-concurrent-sims', type=int, default=DEFAULT_MAX_CONCURRENT_SIMS)
     args = parser.parse_args()
     
     p = _new_pool()

@@ -1,34 +1,20 @@
 from models import *
-from wrapper import Dataset
-print("TEst")
+from processing import Dataset
 from util import resample_df, get_project_path, pd
 
-data_path = lambda file: get_project_path(f"data/{file}")
+def data_path(file: str):
+    return get_project_path(f"data/{file}")
+
+# Define datasets
  
-# run_models_on_data(
-#     name="Lisiecki (2005)",
-#     df=lambda: pd.read_csv(data_path("lisiecki2005-d18o-stack-noaa.csv"), comment='#', header=0, sep='\t'),
-#     age_col="age_calkaBP",
-#     feature_cols=["d18O_benthic", "d18O_error"],
-#     transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=1),
-#     age_format="kya",
-#     models=[
-#         hmm(
-#             n_regimes=5, # Lowest BIC
-#             # min_state_duration=50,
-#             # min_duration_between_switches=100,
-#             p_threshold=0.95
-#         ),
-#         lstm(
-#             seq_len=16,
-#             train=0.4,
-#             threshold=[90],
-#             epochs=300,
-#             smoothing_window=10,
-#             distance=100,
-#         )
-#     ],
-# )
+Lisiecki = Dataset(
+    name="Lisiecki (2005)",
+    df=lambda: pd.read_csv(data_path("lisiecki2005-d18o-stack-noaa.csv"), comment='#', header=0, sep='\t'),
+    age_col="age_calkaBP",
+    feature_cols=["d18O_benthic", "d18O_error"],
+    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=1),
+    age_scale=1000,
+)
 
 Scotese = Dataset(
     name="Scotese et al. (2021)",
@@ -41,20 +27,19 @@ Scotese = Dataset(
         ("North", "Polar >67˚N"), 
         ("South", "Polar <67˚S")
     ],
-    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, 1),
+    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=1),
     age_scale=1000000,
 )
 
-LSTM = BuryLSTM()
-
-LSTM.with_args().run([Scotese])
+# LSTM = LSTMModels()
+# LSTM.with_args().run([Scotese])
 
 # DLM = DLM()
-Metrics(
-    seq_len = 50,
-).run([Scotese])
+# Metrics(
+#     seq_len = 50,
+# ).run([Scotese])
 
-# HMM().run([Scotese])
+HMM().run([Scotese])
 
         # hmm(
         #     min_covar=1e-4,

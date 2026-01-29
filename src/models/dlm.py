@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from pybats.analysis import *
 from pybats.plot import *
 
-from wrapper import Dataset, Model
+from processing import Dataset, Model
 
 class DLM(Model):    
     

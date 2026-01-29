@@ -3,7 +3,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
-from wrapper import Dataset, Model
+from processing import Dataset, Model
 
 
 class Metrics(Model):
@@ -48,12 +48,10 @@ class Metrics(Model):
         
         results = [(dataset, single(dataset)) for dataset in datasets]
         
-        def print_single(result: tuple[Dataset, tuple]):
-            dataset, result = result
+        def print_results(results: list[tuple[Dataset, tuple]]):
+            for dataset, result in results:
             
-            # def print(""):
-            
-            print(f"### Results for {dataset.name}")
+                print(f"### Results for {dataset.name}")
                    
         
         def plot_single(result: tuple[Dataset, tuple]):
@@ -74,6 +72,6 @@ class Metrics(Model):
                 axs[i].plot(dataset.ages(), autocorrelation)
                 i+=1
                 
-            return fig
+            return dataset, fig
         
-        return (lambda: map(print_single, results), lambda: list(map(plot_single, results)))
+        return (lambda: print_results(results), lambda: list(map(plot_single, results)))
