@@ -4,7 +4,7 @@ atomics==1.0.3
 pycont-lite==0.6.0
 pybats==0.0.5
 tensorflow==2.20.0
-pandas>=2.2.3,<3.0
-scikit-learn>=1.6.1,<2.0
+pandas==2.3.3
+scikit-learn==1.8.0
 ewstools==2.1.2
 ruptures==1.1.10

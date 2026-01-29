@@ -125,52 +125,9 @@ def _generate_simulation(
             # L2 norm
             norm = np.sqrt(np.square(diff).sum())
             if norm > conv_thresh:
-                # print('System does not converge - run new model')
                 return None
             
             return s
-        
-        def solve_new():
-        
-            def blowup(t, y: np.ndarray[np.float64]) -> bool:
-                return np.max(np.max(np.abs(y))) > 1e3
-            blowup.terminate = True
-            
-            def is_nan(t, y: np.ndarray[np.float64]) -> bool:
-                return np.isnan(np.min(y))
-            is_nan.terminate = True
-            
-            def is_inf(t, y: np.ndarray[np.float64]) -> bool:
-                return np.isinf(np.max(np.abs(y)))
-            is_inf.terminate = True
-        
-            ## Simulate the system
-            
-            from scipy.integrate import solve_ivp
-        
-            s = solve_ivp(
-                f, 
-                (min(t), max(t)), 
-                s0, 
-                t_eval=t,
-                min_step=1e-14,
-                method='LSODA',
-                # events=[blowup, is_nan, is_inf]
-            )
-            
-            if s.status != 0:
-                return None
-        
-            
-            # Does the system converge?
-            # Difference between max and min of last 10 data points
-            diff = s.y[-10:-1].max() - s.y[-10:-1].min()
-            # L2 norm
-            norm = np.sqrt(np.square(diff).sum())
-            if norm > conv_thresh:
-                return None
-            
-            return s.y
         
         points = solve_old()
         if points is not None:
@@ -218,7 +175,7 @@ class _LocalCounts:
     null_f_count=0
     null_b_count=0
     
-    def get(type: BifType) -> str:
+    def attr(type: BifType) -> str:
         match type:
             case ("HB", True):
                 return "null_h_count"
@@ -232,6 +189,9 @@ class _LocalCounts:
                 return "fold_count"
             case ("BP", False):
                 return "branch_count"
+    
+    def get(self: Self, type: BifType) -> int:
+        return getattr(self, _LocalCounts.attr(type))
 
 class BifCounts:
     
@@ -292,13 +252,15 @@ def _trace(e: BaseException):
     import sys
     print(traceback.format_exception(type(e), e, e.__traceback__), file=sys.stderr, flush=True)
 
+_Simulations = list[tuple[pd.DataFrame, pd.DataFrame, BifType]]
+
 def _gen_data(
         ts_len: int,
         bif_max: int,
         counts: BifCounts,
         pool: Union[Executor, None] = None,
-        simulations: list[tuple[pd.DataFrame, pd.DataFrame, int]] = [],
-) -> list[tuple[pd.DataFrame, pd.DataFrame, int]]:
+        simulations: _Simulations = [],
+) -> list[tuple[pd.DataFrame, pd.DataFrame, BifType]]:
     
     pars, equi, rrate = _generate_simulation()
     
@@ -312,10 +274,8 @@ def _gen_data(
         
         def generator():
             for task in concurrent.futures.as_completed(tasks):
-                if task.exception() is not None:
-                    yield None, task.exception()
-                else:
-                    yield task.result(), None
+                e = task.exception()
+                yield e if e is not None else task.result()
                 
         return generator, cancel
         
@@ -325,27 +285,23 @@ def _gen_data(
             for par in range(len(pars)):
                 if pars[par] != 0.0:
                     try:
-                        yield _simulate(par, pars, equi, rrate, ts_len, bif_max, counts), None
+                        yield _simulate(par, pars, equi, rrate, ts_len, bif_max, counts)
                     except Exception as e:
-                        yield None, e
+                        yield e
         def cancel():
             pass
         return generator, cancel
         
     generator, cancel = none_funcs() if pool is None else pool_funcs()
 
-    for result, exception in generator():
-        match exception:
-            case None:
-                new_sims, newBifCounts = result
-                simulations += ((s, r, t) for s, r, t in new_sims if counts.get(t).load() < bif_maximum(type=t, bif_max=bif_max))
-                counts.add(newBifCounts)
-                if not counts.less_than(bif_max):
-                    break
-            case e:
-                match type(e):
+    for r in generator():
+        match r:
+            case list(new_sims):
+                simulations += new_sims
+            case _:
+                match type(r):
                     case builtins.ValueError:
-                        if "Jacobian inversion yielded zero vector." in str(e):
+                        if "Jacobian inversion yielded zero vector." in str(r):
                             cancel()
                             return _gen_data(ts_len, bif_max, counts=counts, pool=pool, simulations=simulations) 
                     case nl.NoConvergence:
@@ -354,7 +310,8 @@ def _gen_data(
                     case concurrent.futures.CancelledError | builtins.UnboundLocalError:
                         pass
                     case _:
-                        _trace(e)
+                        _trace(r)
+                        
     cancel()
         
     return simulations
@@ -405,7 +362,7 @@ def _simulate(
         ts_len: int,
         bif_max: int,
         prev_counts: BifCounts
-    ) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame, BifType]], _LocalCounts]:
+    ) -> list[tuple[pd.DataFrame, pd.DataFrame, BifType]]:
            
     branches = _gen_branches_py(par, pars, equi)
     
@@ -453,7 +410,7 @@ def _simulate(
         dt_sample = np.random.choice(np.arange(1,11)/10)
         
         def sim(bif_type: BifType) -> bool:
-            attr = _LocalCounts.get(bif_type)
+            attr = _LocalCounts.attr(bif_type)
             max = bif_maximum(type=bif_type, bif_max=bif_max)
             local_count = getattr(counts, attr)
             if  model['type'] == bif_type[0] and (prev_counts.get(bif_type).load() + local_count) < max:
@@ -484,7 +441,7 @@ def _simulate(
         for bif_type in bif_types():
             sim(bif_type=bif_type)
     
-    return sims, counts
+    return sims
 
 def _compute_resid(data: pd.Series) -> pd.DataFrame:
         smooth_data = lowess(data.values, data.index.values, frac=0.2)[:, 1]
@@ -829,35 +786,9 @@ def batch(
                 
         except Exception as e:
             print("Could not open label file with error:", e)
-       
-    def add_simulation(results: list[Tuple[pd.DataFrame, pd.DataFrame, BifType]], simulations = simulations):
-        print("Batch", batch_num, "-", counts)
-        simulations += results
-        if label_file is not None:
-            l = len(simulations) - len(results) + 1
-            for i, result in enumerate(results):
-                result[0].to_csv(os.path.join(path, f"output_sims/tseries{l + i}.csv"))
-                result[1].to_csv(os.path.join(path, f"output_resids/resids{l + i}.csv"))
-                t = result[2]
-                label_file.write(f"{l + i},{_num_from_label(t)},{t[0]},{t[1]}\n")
-            label_file.flush()
-    
-    if pool is None or max_task_count(pool) // 10 == 0:
-        while counts.less_than(bif_max):
-            add_simulation(
-                _gen_data(
-                    ts_len=ts_len,
-                    bif_max=bif_max,
-                    counts=counts,
-                    pool=None,
-                )
-            )
-    else:
-        
-        if callable(pool):
-            pool = pool()
-        
-        tasks: list[Future[Tuple[list[Tuple[pd.DataFrame, pd.DataFrame, int]], BifCounts]]] = []
+            
+    def pool_generator(pool: Executor = pool() if callable(pool) else pool):
+        tasks: list[Future[_Simulations]] = []
         while counts.less_than(bif_max):
             while len(tasks) < max_task_count(tasks) // 10:
                 tasks.append(
@@ -871,24 +802,55 @@ def batch(
                 )
             concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
             for task in tasks:
-                if counts.less_than(bif_max) and task.done():
+                if task.done():
                     match task.exception():
                         case None:
                             tasks.remove(task)
-                            add_simulation(task.result())
+                            yield task.result()
                         case e:
                             match type(e):
                                 case concurrent.futures.CancelledError:
                                     pass
                                 case _:
                                     _trace(e)
+        for task in tasks:
+            task.cancel()
+        
+    def single_generator():
+        while counts.less_than(bif_max):
+            yield _gen_data(
+                    ts_len=ts_len,
+                    bif_max=bif_max,
+                    counts=counts,
+                    pool=None,
+                )
+    
+    generator = single_generator if pool is None or max_task_count(pool) // 10 == 0 else pool_generator
+    for results in generator():
+        print("Batch", batch_num, "-", counts)
+        update = False
+        for i, result in enumerate(results):
+            type = result[2]
+            count = counts.get(type)
+            if count.load() < bif_maximum(type=type, bif_max=bif_max):
+                simulations.append(result)
+                count.inc()
+                if label_file is not None:
+                    update = True
+                    i = len(simulations)
+                    result[0].to_csv(os.path.join(path, f"output_sims/tseries{i}.csv"))
+                    result[1].to_csv(os.path.join(path, f"output_resids/resids{i}.csv"))
+                    label_file.write(f"{len(simulations)},{_num_from_label(type)},{type[0]},{type[1]}\n")
+
+        if update:
+            label_file.flush()
     
     tuple = _to_traindata(counts, simulations)
     
     print("Batch", batch_num, "finished")    
     return tuple
 
-# Returns combined (sims, resids, df_labels, df_groups)
+# Returns combined (sims, resids, labels, groups)
 def combine(
         a: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame], 
         b: tuple[list[pd.DataFrame], list[pd.DataFrame], pd.DataFrame, pd.DataFrame]
@@ -897,7 +859,7 @@ def combine(
     new3 = b[3]['sequence_ID'] + len(a[0])
     return (a[0] + b[0], a[1] + b[1], pd.concat([a[2], new2]), pd.concat([a[3], new3]))
 
-# Returns (sims, resids, df_labels, df_groups)
+# Returns (sims, resids, labels, groups)
 def multibatch(
         path, 
         batch_pool: Executor, 
