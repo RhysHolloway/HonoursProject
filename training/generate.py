@@ -910,7 +910,7 @@ def multibatch(
     if path is None:
         return combiner()
     else:
-        save(path, combiner)
+        save(os.path.join(path, "combined/"), combiner)
 
 def save(path, generator: Callable[[], _TrainData]) -> _TrainData:
     
