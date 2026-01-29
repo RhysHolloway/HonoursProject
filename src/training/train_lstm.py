@@ -40,6 +40,13 @@ import scipy.optimize._nonlin as nl
 
 BifType = Tuple[Literal["BP", "LP", "HB"], bool]
 
+def bif_maximum(type: BifType, bif_max: int) -> int:
+    type, null = type
+    if null:
+        return ((bif_max - 2 * (bif_max // 3)) if (type == "BP") else (bif_max // 3))
+    else:
+        return bif_max
+
 def _generate_simulation(
     # Define convergence threshold
     conv_thresh = 1e-8, 
@@ -287,25 +294,6 @@ class BifCounts:
                 return self.fold_count
             case ("BP", False):
                 return self.branch_count
-            
-    def maximum(type: BifType, total: int) -> int:
-        match type:
-            case ("HB", True):
-                return total // 3
-            case ("LP", True):
-                return total // 3
-            case ("BP", True):
-                return total - 2 * (total // 3)
-            case ("HB", False):
-                return total
-            case ("LP", False):
-                return total
-            case ("BP", False):
-                return total
-        
-        
-
-
 SOLVER_PARAMETERS: Final[dict] = {
     "tolerance": 1e-8,
     "hopf_detection": True,
@@ -313,7 +301,7 @@ SOLVER_PARAMETERS: Final[dict] = {
     "param_max": 5.0,
 }
 
-ALLOWED_BIFS: Final[set] = set(["BP", "LP", "HB"])
+ALLOWED_BIFS: Final[set[Literal["BP", "LP", "HB"]]] = set(["BP", "LP", "HB"])
 
 LABEL_COLS = ['sequence_ID', 'class_label', 'bif', 'null']
 
@@ -368,8 +356,7 @@ def _gen_data(
         match exception:
             case None:
                 new_sims, newBifCounts = result
-                new_sims = [(s, r, t) for s, r, t in new_sims if counts.get(t).load() < counts.maximum(t)]
-                simulations += new_sims
+                simulations += ((s, r, t) for s, r, t in new_sims if counts.get(t).load() < bif_maximum(type=t, bif_max=bif_max))
                 counts.add(newBifCounts)
                 if not counts.less_than(bif_max):
                     break
@@ -486,7 +473,7 @@ def _simulate(
         
         def sim(bif_type: BifType) -> bool:
             attr = _LocalCounts.get(bif_type)
-            max = BifCounts.maximum(bif_type, bif_max)
+            max = bif_maximum(type=bif_type, bif_max=bif_max)
             local_count = getattr(counts, attr)
             if  model['type'] == bif_type[0] and (prev_counts.get(bif_type).load() + local_count) < max:
                 df_out = _sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
@@ -511,13 +498,10 @@ def _simulate(
                     setattr(counts, attr, local_count + 1)
                     return True
             return False
-
-        sim(('HB', True))
-        sim(('LP', True))
-        sim(('BP', True))
-        sim(('HB', False))
-        sim(('LP', False))
-        sim(('BP', False))
+        
+        for bif in ALLOWED_BIFS:
+            for null in [True, False]:
+                sim(bif_type=(bif, null))
     
     return sims, counts
     
@@ -779,12 +763,9 @@ def _to_traindata(
     
     return sims, resids, df_labels, df_groups
 
-def _compute_resid(data: pd.Series) -> pd.Series:
+def _compute_resid(data: pd.Series) -> pd.DataFrame:
         smooth_data = lowess(data.values, data.index.values, frac=0.2)[:, 1]
-        return data.values - smooth_data
-
-def _compute_resids(dfs: list[pd.DataFrame]) -> list[pd.DataFrame]:
-    return [_compute_resid(df['x']) for df in dfs]
+        return pd.Series(data.values - smooth_data, index=data.index).to_frame(name="Residuals")
 
 ################################################################################
 
@@ -793,12 +774,13 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 import os.path
 import os
+from pathlib import Path
 
 DEFAULT_MAX_CONCURRENT_SIMS: Final[int] = 3
 
 
 def _new_pool():
-    pool = concurrent.futures.ThreadPoolExecutor()
+    pool = concurrent.futures.ProcessPoolExecutor()
         
     def kill():
         pool.shutdown(wait=False, cancel_futures=True)
@@ -844,11 +826,17 @@ def batch(
         os.makedirs(path, exist_ok=True)
         os.makedirs(os.path.join(path, f"output_sims/"), exist_ok=True)
         os.makedirs(os.path.join(path, f"output_resids/"), exist_ok=True)
-        with os.fdopen(os.open(os.path.join(path, "labels.csv"), flags = os.O_RDWR | os.O_CREAT)) as l:
-            try: 
-                labels = pd.read_csv(l)
-            except pd.errors.EmptyDataError:
-                labels = pd.DataFrame(columns=LABEL_COLS)
+        try:
+            labels_path = os.path.join(path, "labels.csv")
+            
+            if not os.path.exists(labels_path):
+                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path)
+                
+            label_file = open(labels_path, "r+")
+            
+            labels = pd.read_csv(label_file)
+                
+            
             simulations += [(
                 pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
                 pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
@@ -859,7 +847,9 @@ def batch(
             if len(simulations) > 0:
                 # ts_len is same between previous iterations and now
                 assert simulations[0][0].shape[0] == ts_len
-            label_file = l
+                
+        except Exception as e:
+            print("Could not open label file with error:", e)
        
     def add_simulation(results: list[Tuple[pd.DataFrame, pd.DataFrame, BifType]], simulations = simulations):
         simulations += results
@@ -870,6 +860,7 @@ def batch(
                 result[1].to_csv(os.path.join(path, f"output_resids/resids{l + i}.csv"))
                 t = result[2]
                 label_file.write(f"{l + i},{_num_from_label(t)},{t[0]},{t[1]}\n")
+            label_file.flush()
     
     if pool is None or max_task_count(pool) // 10 == 0:
         while counts.less_than(bif_max):
@@ -954,12 +945,12 @@ def multibatch(
             combine, 
             batch_pool.map(
                 batch, 
-                batch_num=range(1, batches + 1), 
-                ts_len=[ts_len] * batches, 
-                bif_max=[bif_max] * batches, 
-                pool=[sim_pool] * batches, 
-                path=[path] * batches,
-                max_task_count=[max_task_count] * batches,
+                range(1, batches + 1), 
+                [ts_len] * batches, 
+                [bif_max] * batches, 
+                [sim_pool] * batches, 
+                [max_task_count] * batches,
+                [path] * batches,
             )
         ))
     else:
@@ -981,12 +972,12 @@ def save(path, generator: Callable[[BifCounts], tuple[list[pd.DataFrame], list[p
     sims, resids, labels, groups = generator()
     
     sims_path = os.path.join(path, "output_sims/")
-    os.makedirs(sims_path)
+    os.makedirs(sims_path, exist_ok=True)
     for i, sim in enumerate(sims):
         sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
     
     resids_path = os.path.join(path, "output_resids/")
-    os.makedirs(resids_path)
+    os.makedirs(resids_path, exist_ok=True)
     for i, resid in enumerate(resids):
         resid.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
         
@@ -994,6 +985,9 @@ def save(path, generator: Callable[[BifCounts], tuple[list[pd.DataFrame], list[p
     groups.to_csv(os.path.join(path, "groups.csv"))
     
     return sims, resids, labels, groups
+
+def _new_sim_pool():
+    return concurrent.futures.ThreadPoolExecutor()
     
 def run_with_args(max_task_count: Callable[[Executor], int] = _max_task_count):
     
@@ -1009,11 +1003,7 @@ def run_with_args(max_task_count: Callable[[Executor], int] = _max_task_count):
     args = parser.parse_args()
     
     p = _new_pool()
-    multibatch(path=args.output, batch_pool=p, sim_pool=p, batches=args.batches, ts_len=args.length, bif_max=args.bifurcations, max_task_count=max_task_count)
+    multibatch(path=args.output, batch_pool=p, sim_pool=_new_sim_pool, batches=args.batches, ts_len=args.length, bif_max=args.bifurcations, max_task_count=max_task_count)
     
 if __name__ == "__main__":
     run_with_args()
-   
-
-    
-    
