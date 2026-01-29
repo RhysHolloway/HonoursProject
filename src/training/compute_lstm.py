@@ -53,5 +53,6 @@ train_lstm.multibatch(
     sim_pool=sim_pool,
     batches=args.batches,
     ts_len=args.length,
-    bif_max=args.bifurcations
+    bif_max=args.bifurcations,
+    max_task_count=lambda _: int(os.environ.get(["SLURM_CPUS_PER_TASK"]) or 1)
 )
