@@ -19,7 +19,7 @@ import atomics
 import numpy as np
 import ruptures
 from functools import reduce
-from typing import Callable, Final, Iterable, Literal, Self, Sequence, Union, Tuple
+from typing import Any, Callable, Final, Iterable, Literal, Self, Sequence, Union, Tuple
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
@@ -187,6 +187,10 @@ class _Counts(metaclass = abc.ABCMeta):
             case ("BP", False):
                 return "branch_count"
     
+    def __init__(self: Self, initializer: Callable[[BifType], Any]):
+        for type in bif_types():
+            setattr(self, _Counts.attr(type), initializer(type))
+    
     @abc.abstractmethod
     def count(self: Self, type: BifType) -> int:
         pass
@@ -196,10 +200,10 @@ class _Counts(metaclass = abc.ABCMeta):
         pass
     
     def null_count(self: Self) -> int:
-        return sum(self.count((bif, True) for bif in BIFS))
+        return sum(self.count((bif, True)) for bif in BIFS)
         
     def bif_count(self: Self) -> int:
-        return sum(self.count((bif, False) for bif in BIFS))
+        return sum(self.count((bif, False)) for bif in BIFS)
     
     def total(self: Self) -> int:
         return self.bif_count() + self.null_count()
@@ -213,13 +217,7 @@ class _Counts(metaclass = abc.ABCMeta):
 class _AtomicCounts(_Counts):
     
     def __init__(self):
-        super().__init__()
-        self.hopf_count=atomics.atomic(width=4, atype=atomics.INT)
-        self.fold_count=atomics.atomic(width=4, atype=atomics.INT)
-        self.branch_count=atomics.atomic(width=4, atype=atomics.INT)
-        self.null_h_count=atomics.atomic(width=4, atype=atomics.INT)
-        self.null_f_count=atomics.atomic(width=4, atype=atomics.INT)
-        self.null_b_count=atomics.atomic(width=4, atype=atomics.INT)
+        super().__init__(lambda _: atomics.atomic(width=4, atype=atomics.INT))
     
     def _get(self, type: BifType) -> atomics.INT:
         return getattr(self, _Counts.attr(type))
@@ -233,9 +231,7 @@ class _AtomicCounts(_Counts):
 class BifCounts(_Counts):
     
     def __init__(self: Self, counts: Union[_AtomicCounts, None] = None):
-        super().__init__()
-        for type in bif_types():
-            setattr(self, _Counts.attr(type), 0 if counts is None else counts.count(type))
+        super().__init__(lambda type: 0 if counts is None else counts.count(type))
             
     def count(self: Self, type: BifType) -> int:
         return getattr(self, _Counts.attr(type))
@@ -792,7 +788,7 @@ def batch(
                         _gen_model,
                         ts_len=ts_len,
                         bif_max=bif_max,
-                        counts=counts,
+                        total_counts=counts,
                         pool=pool,
                     )
                 )
@@ -817,7 +813,7 @@ def batch(
             yield _gen_model(
                     ts_len=ts_len,
                     bif_max=bif_max,
-                    counts=counts,
+                    total_counts=counts,
                     pool=None,
                 )
     
