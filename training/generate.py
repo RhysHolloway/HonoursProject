@@ -670,7 +670,7 @@ def _to_traindata(
             (i + 1, _num_from_label(label), label[0], label[1])
             for i, label in enumerate(labels)
         ), columns = LABEL_COLS
-    ).set_index('sequence_ID')
+    )
     
     for type in bif_types():
         max = bif_maximum(type=type, bif_max=bif_max)
@@ -715,7 +715,7 @@ def _to_traindata(
     df_null['dataset_ID'] = group_nums
 
     # Concatenate dataframes and select relevant columns
-    df_groups = pd.concat([df_fold,df_hopf,df_branch,df_null], columns='dataset_ID')
+    df_groups = pd.concat([df_fold,df_hopf,df_branch,df_null])[['sequence_ID', 'dataset_ID']]
     # Sort rows by sequence_ID
     df_groups.sort_values(by=['sequence_ID'], inplace=True)
     
@@ -824,12 +824,13 @@ def batch(
             
             for seq_id, bif, null in labels[['sequence_ID', 'bif', 'null']].itertuples(index=False, name=None):
                 type: BifType = (bif, null)
-                counts.inc(type)
-                simulations.append((
-                    pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
-                    pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
-                    (bif, null)
-                ))
+                if counts.count(type) < bif_maximum(type, bif_max):
+                    counts.inc(type)
+                    simulations.append((
+                        pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
+                        pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
+                        (bif, null)
+                    ))
                 
             if len(simulations) > 0:
                 # ts_len is same between previous iterations and now
@@ -930,15 +931,16 @@ def save(path, generator: Callable[[], _TrainData]) -> _TrainData:
     os.makedirs(sims_path, exist_ok=True)
     resids_path = os.path.join(path, "output_resids/")
     os.makedirs(resids_path, exist_ok=True)
-    for i, (sim, resid) in enumerate(simsresids):
-        sim.to_csv(os.path.join(sims_path, f"tseries{i + 1}.csv"))
-        resid.to_csv(os.path.join(resids_path, f"resids{i + 1}.csv"))
+    for i in labels['sequence_ID']:
+        sim, resids = simsresids[i - 1]
+        sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
+        resids.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
         
     shutil.make_archive(os.path.join('output_sims.zip'), 'zip', sims_path)
     shutil.make_archive(os.path.join('output_resids.zip'), 'zip', resids_path)
         
-    labels.to_csv(os.path.join(path, "labels.csv"))
-    groups.to_csv(os.path.join(path, "groups.csv"))
+    labels.to_csv(os.path.join(path, "labels.csv"), index=False)
+    groups.to_csv(os.path.join(path, "groups.csv"), index=False)
     
     return simsresids, labels, groups
 
