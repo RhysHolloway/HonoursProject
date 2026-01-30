@@ -659,29 +659,7 @@ def _to_traindata(
     test_percentage = 0.01,
 ) -> _TrainData:
     
-    bif_total = counts.total()
-    
-    sims: list[pd.DataFrame]
-    resids: list[pd.DataFrame]
-    labels: list[BifType]
     sims, resids, labels = zip(*simulations)
-    
-    # Truncate data to bif_max
-    for type in bif_types():
-        max = bif_maximum(type, bif_max=bif_max)
-        count = 0
-        i = 0
-        while i < len(labels):
-            if labels[i] == type:
-                if count < max:
-                    count+=1
-                    i+=1
-                else:
-                    labels.pop(i)
-                    sims.pop(i)
-                    resids.pop(i)
-            else:
-                i+=1
         
     #----------------------------
     # Convert label files into single csv file
@@ -692,7 +670,12 @@ def _to_traindata(
             (i + 1, _num_from_label(label), label[0], label[1])
             for i, label in enumerate(labels)
         ), columns = LABEL_COLS
-    )
+    ).set_index('sequence_ID')
+    
+    for type in bif_types():
+        max = bif_maximum(type=type, bif_max=bif_max)
+        matches = df_labels[["bif", "null"]].eq(type).all(axis=1)
+        df_labels = df_labels.drop(df_labels.index[matches & (matches.cumsum() > max)])
 
     #----------------------------
     # Create groups file in ratio for training:validation:testing
@@ -700,10 +683,10 @@ def _to_traindata(
 
     # Create the file groups.csv with headers (sequence_ID, dataset_ID)
     # Use numbers 1 for training, 2 for validation and 3 for testing
-    # Use raito 38:1:1        
+    # Use raito 38:1:1
 
     # Collect Fold bifurcations (label 0)
-    df_fold = df_labels[df_labels[['class_label']]==0].copy()
+    df_fold = df_labels[df_labels['class_label'] == 0].copy()
     # Collect Hopf bifurcations (label 1)
     df_hopf = df_labels[df_labels['class_label']==1].copy()
     # Collect Branch points (label 2)
@@ -712,15 +695,15 @@ def _to_traindata(
     df_null = df_labels[df_labels['class_label']==3].copy()
 
     # Check they all have the same length
+    assert bif_max == len(df_fold)
     assert len(df_fold) == len(df_hopf)
     assert len(df_hopf) == len(df_branch)
     assert len(df_branch) == len(df_null)
 
-
     # Compute number of bifurcations for each group
-    num_validation = int(np.floor(bif_total*validation_percentage))
-    num_test = int(np.floor(bif_total*test_percentage))
-    num_train = bif_total - num_validation - num_test
+    num_validation = int(np.floor(bif_max*validation_percentage))
+    num_test = int(np.floor(bif_max*test_percentage))
+    num_train = bif_max - num_validation - num_test
 
     # Create list of group numbers
     group_nums = [1]*num_train + [2]*num_validation + [3]*num_test
@@ -732,7 +715,7 @@ def _to_traindata(
     df_null['dataset_ID'] = group_nums
 
     # Concatenate dataframes and select relevant columns
-    df_groups = pd.concat([df_fold,df_hopf,df_branch,df_null])[['sequence_ID','dataset_ID']]
+    df_groups = pd.concat([df_fold,df_hopf,df_branch,df_null], columns='dataset_ID')
     # Sort rows by sequence_ID
     df_groups.sort_values(by=['sequence_ID'], inplace=True)
     
@@ -742,6 +725,7 @@ def _to_traindata(
 
 import os.path
 import os
+import shutil
 
 def _new_pool():
     pool = concurrent.futures.ProcessPoolExecutor()
@@ -949,6 +933,9 @@ def save(path, generator: Callable[[], _TrainData]) -> _TrainData:
     for i, (sim, resid) in enumerate(simsresids):
         sim.to_csv(os.path.join(sims_path, f"tseries{i + 1}.csv"))
         resid.to_csv(os.path.join(resids_path, f"resids{i + 1}.csv"))
+        
+    shutil.make_archive(os.path.join('output_sims.zip'), 'zip', sims_path)
+    shutil.make_archive(os.path.join('output_resids.zip'), 'zip', resids_path)
         
     labels.to_csv(os.path.join(path, "labels.csv"))
     groups.to_csv(os.path.join(path, "groups.csv"))
