@@ -437,8 +437,7 @@ def _simulate(
                 trans_time = _trans_detect(df_out)
                 # Only if trans_time > ts_len, keep and cut trajectory
                 # print(f"Trans time {trans_time}")
-                if trans_time > ts_len:
-                    model_counts.inc(bif_type)
+                if trans_time > ts_len and model_counts._get(bif_type).fetch_inc() + (model_counts.null_count() if bif_type[1] else 0) == 0:
                     df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
                     # Have time-series start at time t=0
                     df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
