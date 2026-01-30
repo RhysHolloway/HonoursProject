@@ -844,7 +844,7 @@ def batch(
                 simulations.append((
                     pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
                     pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
-                    _num_from_label((bif, null))
+                    (bif, null)
                 ))
                 
             if len(simulations) > 0:
