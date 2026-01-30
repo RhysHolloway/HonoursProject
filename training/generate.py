@@ -188,7 +188,11 @@ class _Counts(metaclass = abc.ABCMeta):
                 return "branch_count"
     
     @abc.abstractmethod
-    def count(self, type: BifType) -> int:
+    def count(self: Self, type: BifType) -> int:
+        pass
+    
+    @abc.abstractmethod
+    def inc(self: Self, type: BifType):
         pass
     
     def null_count(self: Self) -> int:
@@ -217,11 +221,14 @@ class _AtomicCounts(_Counts):
         self.null_f_count=atomics.atomic(width=4, atype=atomics.INT)
         self.null_b_count=atomics.atomic(width=4, atype=atomics.INT)
     
-    def get(self, type: BifType) -> atomics.INT:
+    def _get(self, type: BifType) -> atomics.INT:
         return getattr(self, _Counts.attr(type))
     
     def count(self, type: BifType) -> int:
-        return self.get(type).load()
+        return self._get(type).load()
+    
+    def inc(self, type: BifType):
+        self._get(type).inc()
 
 class BifCounts(_Counts):
     
@@ -245,6 +252,10 @@ class BifCounts(_Counts):
         new = self.copy()
         new += other
         return new
+    
+    def inc(self, type: BifType):
+        attr = _Counts.attr(type)
+        setattr(self, attr, getattr(self, attr) + 1)
 
 SOLVER_PARAMETERS: Final[dict] = {
     "tolerance": 1e-8,
@@ -260,17 +271,19 @@ def _trace(e: BaseException):
 
 _Simulations = list[tuple[pd.DataFrame, pd.DataFrame, BifType]]
 
-def _gen_data(
+def _gen_model(
         ts_len: int,
         bif_max: int,
-        counts: _AtomicCounts,
+        total_counts: _AtomicCounts,
         pool: Union[Executor, None] = None,
         simulations: _Simulations = [],
 ) -> list[tuple[pd.DataFrame, pd.DataFrame, BifType]]:
     
+    model_counts = _AtomicCounts()
+    
     # Multithread the parameter simuations
     def pool_funcs():
-        tasks = [pool.submit(_simulate, par, pars, equi, rrate, ts_len, bif_max, counts) for par in range(len(pars)) if pars[par] != 0.0]
+        tasks = [pool.submit(_simulate, par, pars, equi, rrate, ts_len, bif_max, total_counts, model_counts) for par in range(len(pars)) if pars[par] != 0.0]
                 
         def cancel():
             for task in tasks:
@@ -289,7 +302,7 @@ def _gen_data(
             for par in range(len(pars)):
                 if pars[par] != 0.0:
                     try:
-                        yield _simulate(par, pars, equi, rrate, ts_len, bif_max, counts)
+                        yield _simulate(par, pars, equi, rrate, ts_len, bif_max, total_counts, model_counts)
                     except Exception as e:
                         yield e
         def cancel():
@@ -309,10 +322,10 @@ def _gen_data(
                     case builtins.ValueError:
                         if "Jacobian inversion yielded zero vector." in str(r):
                             cancel()
-                            return _gen_data(ts_len, bif_max, counts=counts, pool=pool, simulations=simulations) 
+                            return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations) 
                     case nl.NoConvergence:
                         cancel()
-                        return _gen_data(ts_len, bif_max, counts=counts, pool=pool, simulations=simulations)
+                        return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations)
                     case concurrent.futures.CancelledError | builtins.UnboundLocalError:
                         pass
                     case _:
@@ -367,10 +380,9 @@ def _simulate(
         rrate: np.float64,
         ts_len: int,
         bif_max: int,
-        prev_counts: _AtomicCounts
+        total_counts: _AtomicCounts,
+        model_counts: _AtomicCounts,
     ) -> list[tuple[pd.DataFrame, pd.DataFrame, BifType]]:
-           
-    branches = _gen_branches_py(par, pars, equi)
     
     """
     Created on Wed Jul 31 10:05:17 2019
@@ -383,9 +395,9 @@ def _simulate(
     Detect transition point using change-point algorithm
     Ouptut time-series of ts_len time units prior to transition
 
-    """
-
-    counts = BifCounts()
+    """          
+     
+    branches = _gen_branches_py(par, pars, equi)
 
     # Noise amplitude
     sigma_tilde = 0.01
@@ -416,10 +428,12 @@ def _simulate(
         dt_sample = np.random.choice(np.arange(1,11)/10)
         
         def sim(bif_type: BifType) -> bool:
-            attr = BifCounts.attr(bif_type)
-            max = bif_maximum(type=bif_type, bif_max=bif_max)
-            local_count = getattr(counts, attr)
-            if  model['type'] == bif_type[0] and (prev_counts.get(bif_type).load() + local_count) < max:
+            
+            if (
+                (model_counts.null_count() if bif_type[1] else model_counts.count(bif_type)) == 0 and # Has this model not ran this (or another null sim if null) simulation yet
+                model['type'] == bif_type[0] and 
+                (total_counts.count(bif_type) + model_counts.count(bif_type)) < bif_maximum(type=bif_type, bif_max=bif_max)
+                ):
                 df_out = _sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
                             sigma=sigma, null_sim=bif_type[1])
                 if df_out is None:
@@ -428,6 +442,7 @@ def _simulate(
                 # Only if trans_time > ts_len, keep and cut trajectory
                 # print(f"Trans time {trans_time}")
                 if trans_time > ts_len:
+                    model_counts.inc(bif_type)
                     df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
                     # Have time-series start at time t=0
                     df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
@@ -440,7 +455,6 @@ def _simulate(
                         # Label
                         bif_type,
                     ))
-                    setattr(counts, attr, local_count + 1)
                     return True
             return False
         
@@ -646,6 +660,8 @@ def _to_traindata(
     bif_max: int,
     simulations: _Simulations,
     counts: BifCounts,
+    validation_percentage = 0.04,
+    test_percentage = 0.01,
 ) -> _TrainData:
     
     bif_total = counts.total()
@@ -707,12 +723,12 @@ def _to_traindata(
 
 
     # Compute number of bifurcations for each group
-    num_valid = int(np.floor(bif_total*0.04))
-    num_test = int(np.floor(bif_total*0.01))
-    num_train = bif_total - num_valid - num_test
+    num_validation = int(np.floor(bif_total*validation_percentage))
+    num_test = int(np.floor(bif_total*test_percentage))
+    num_train = bif_total - num_validation - num_test
 
     # Create list of group numbers
-    group_nums = [1]*num_train + [2]*num_valid + [3]*num_test
+    group_nums = [1]*num_train + [2]*num_validation + [3]*num_test
 
     # Assign group numbers to each bifurcation category
     df_fold['dataset_ID'] = group_nums
@@ -773,7 +789,7 @@ def batch(
             while len(tasks) < max_task_count(tasks) // 10:
                 tasks.append(
                     pool.submit(
-                        _gen_data,
+                        _gen_model,
                         ts_len=ts_len,
                         bif_max=bif_max,
                         counts=counts,
@@ -798,7 +814,7 @@ def batch(
         
     def single_generator():
         while counts < bif_max:
-            yield _gen_data(
+            yield _gen_model(
                     ts_len=ts_len,
                     bif_max=bif_max,
                     counts=counts,
@@ -829,7 +845,7 @@ def batch(
             
             for seq_id, bif, null in labels[['sequence_ID', 'bif', 'null']].itertuples(index=False, name=None):
                 type: BifType = (bif, null)
-                counts.get(type).inc()
+                counts.inc(type)
                 simulations.append((
                     pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
                     pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
@@ -853,10 +869,9 @@ def batch(
         update = False
         for i, result in enumerate(results):
             type = result[2]
-            count = counts.get(type)
-            if count.load() < bif_maximum(type=type, bif_max=bif_max):
+            if counts.count(type) < bif_maximum(type=type, bif_max=bif_max):
                 simulations.append(result)
-                count.inc()
+                counts.inc(type)
                 if label_file is not None:
                     update = True
                     i = len(simulations)
