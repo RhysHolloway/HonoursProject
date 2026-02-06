@@ -14,12 +14,10 @@ Made to run using only one file, multithreaded, and without AUTO-07p
 import abc
 import builtins
 import copy
-import typing
 import atomics
 import numpy as np
 import ruptures
-from functools import reduce
-from typing import Any, Callable, Final, Iterable, Literal, Self, Sequence, Union, Tuple
+from typing import Any, Callable, Final, Self, Sequence, Union
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
@@ -27,23 +25,7 @@ from concurrent.futures import Executor, Future
 import scipy.optimize._nonlin as nl
 import pycont
 
-BifId = Literal["BP", "LP", "HB"]
-
-BifType = Tuple[BifId, bool]
-
-BIFS: Final[list[BifId]] = list(typing.get_args(BifId))
-
-def bif_types():
-    for null in [True, False]:
-        for type in BIFS:
-            yield (type, null)
-
-def bif_maximum(type: BifType, bif_max: int) -> int:
-    type, null = type
-    if null:
-        return ((bif_max - 2 * (bif_max // 3)) if (type == "BP") else (bif_max // 3))
-    else:
-        return bif_max
+from util import *
 
 def _generate_simulation(
     # Define convergence threshold
@@ -265,15 +247,17 @@ def _trace(e: BaseException):
     import sys
     print(traceback.format_exception(type(e), e, e.__traceback__), file=sys.stderr, flush=True)
 
-_Simulations = list[tuple[pd.DataFrame, pd.DataFrame, BifType]]
+type _Simulation = tuple[Sims, Resids, BifType]
+type _Simulations = dict[int, _Simulation]
 
+type _ModelOutput = list[_Simulation]
 def _gen_model(
         ts_len: int,
         bif_max: int,
         total_counts: _AtomicCounts,
         pool: Union[Executor, None] = None,
-        simulations: _Simulations = [],
-) -> list[tuple[pd.DataFrame, pd.DataFrame, BifType]]:
+        simulations: _ModelOutput = [],
+) -> _ModelOutput:
     
     model_counts = _AtomicCounts()
     
@@ -408,7 +392,7 @@ def _simulate(
     sigma = np.sqrt(2*rrate) * sigma_tilde * rv_tri
 
     # Only simulate bifurcation types that have count below bif_max
-    sims: list[tuple[pd.DataFrame, pd.DataFrame, int]] = []
+    sims: list[tuple[pd.Series, pd.Series, int]] = []
     
     # Define length of simulation
     # This is 200 points longer than ts_len
@@ -444,9 +428,9 @@ def _simulate(
                     df_cut.set_index('Time', inplace=True)
                     sims.append((
                         # Simulations
-                        df_cut[['x']], 
+                        df_cut['x'], 
                         # Residuals
-                        _compute_resid(df_cut['x']),
+                        compute_residuals(df_cut['x']),
                         # Label
                         bif_type,
                     ))
@@ -457,10 +441,6 @@ def _simulate(
             sim(bif_type=bif_type)
     
     return sims
-
-def _compute_resid(data: pd.Series) -> pd.DataFrame:
-        smooth_data = lowess(data.values, data.index.values, frac=0.2)[:, 1]
-        return pd.Series(data.values - smooth_data, index=data.index).to_frame(name="Residuals")
     
 # Throws floating point error
 def _sim_model(
@@ -647,30 +627,17 @@ def _trans_detect(df_in):
     out = min(max(0,t_nan-1),t_jump-1)
     return out
 
-LABEL_COLS = ['sequence_ID', 'class_label', 'bif', 'null']
-
-_TrainData = tuple[list[tuple[pd.DataFrame, pd.DataFrame]], pd.DataFrame, pd.DataFrame]
-
-def _to_traindata(
+def _create_groups(
+    df_labels: pd.DataFrame,
     bif_max: int,
-    simulations: _Simulations,
-    counts: BifCounts,
     validation_percentage = 0.04,
-    test_percentage = 0.01,
-) -> _TrainData:
-    
-    sims, resids, labels = zip(*simulations)
+    test_percentage = 0.01,    
+) -> Groups:
+    for type in bif_types():
+        max = bif_maximum(type=type, bif_max=bif_max)
+        matches = df_labels[["bif", "null"]].eq(type).all(axis=1)
+        df_labels = df_labels.drop(df_labels.index[matches & (matches.cumsum() > max)])
         
-    #----------------------------
-    # Convert label files into single csv file
-    #-----------------------------
-
-    df_labels: pd.DataFrame = pd.DataFrame(
-        (
-            (i + 1, _num_from_label(label), label[0], label[1])
-            for i, label in enumerate(labels)
-        ), columns = LABEL_COLS
-    )
     
     for type in bif_types():
         max = bif_maximum(type=type, bif_max=bif_max)
@@ -715,11 +682,11 @@ def _to_traindata(
     df_null['dataset_ID'] = group_nums
 
     # Concatenate dataframes and select relevant columns
-    df_groups = pd.concat([df_fold,df_hopf,df_branch,df_null])[['sequence_ID', 'dataset_ID']]
+    df_groups = pd.concat([df_fold,df_hopf,df_branch,df_null])[[INDEX_COL, 'dataset_ID']]
     # Sort rows by sequence_ID
-    df_groups.sort_values(by=['sequence_ID'], inplace=True)
+    df_groups.sort_values(by=[INDEX_COL], inplace=True)
     
-    return list(zip(sims, resids)), df_labels, df_groups, counts
+    return df_groups
 
 ################################################################################
 
@@ -760,10 +727,10 @@ def batch(
     pool: Union[Executor, None, Callable[[], Executor]] = _new_pool(),
     max_task_count: Callable[[Executor], int] = _max_task_count,
     path: Union[None, str] = None,
-    ) -> _TrainData:
+    ) -> TrainData:
     
     def pool_generator(pool: Executor):
-        tasks: list[Future[_Simulations]] = []
+        tasks: list[Future[_ModelOutput]] = []
         while counts < bif_max:
             while len(tasks) < max_task_count(tasks) // 10:
                 tasks.append(
@@ -804,7 +771,7 @@ def batch(
     
     pool = pool() if callable(pool) else pool
     
-    simulations: _Simulations = []
+    simulations: _Simulations = dict()
     counts = _AtomicCounts()
     
     # Continue from previous state
@@ -822,66 +789,71 @@ def batch(
             
             labels = pd.read_csv(labels_path)
             
-            for seq_id, bif, null in labels[['sequence_ID', 'bif', 'null']].itertuples(index=False, name=None):
+            for seq_id, bif, null in labels[[INDEX_COL, 'bif', 'null']].itertuples(index=False, name=None):
                 type: BifType = (bif, null)
                 if counts.count(type) < bif_maximum(type, bif_max):
-                    counts.inc(type)
-                    simulations.append((
+                    simulations[seq_id] = (
                         pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
                         pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
                         (bif, null)
-                    ))
+                    )
+                    counts.inc(type)
                 
             if len(simulations) > 0:
                 # ts_len is same between previous iterations and now
-                assert simulations[0][0].shape[0] == ts_len
+                assert len(next(iter(simulations.values()))[0]) == ts_len
                           
             label_file = open(labels_path, "a+")
                 
-        except Exception as e:
-            print("Could not open label file with error:", e)
+        except BaseException as e:
+            _trace(e)
             
     print("Batch", batch_num, "loaded", len(simulations), "previous simulations")
     
+    current = max(simulations.keys()) + 1 if len(simulations) != 0 else 1
+    
     generator = single_generator() if pool is None or max_task_count(pool) // 10 == 0 else pool_generator(pool)
+    
     for results in generator:
         print("Batch", batch_num, "-", counts)
         update = False
-        for i, result in enumerate(results):
+        for result in results:
             type = result[2]
             if counts.count(type) < bif_maximum(type=type, bif_max=bif_max):
-                simulations.append(result)
+                simulations[current] = result
                 counts.inc(type)
                 if label_file is not None:
                     update = True
-                    i = len(simulations)
-                    result[0].to_csv(os.path.join(path, f"output_sims/tseries{i}.csv"))
-                    result[1].to_csv(os.path.join(path, f"output_resids/resids{i}.csv"))
-                    label_file.write(f"{len(simulations)},{_num_from_label(type)},{type[0]},{type[1]}\n")
+                    result[0].to_csv(os.path.join(path, f"output_sims/tseries{current}.csv"))
+                    result[1].to_csv(os.path.join(path, f"output_resids/resids{current}.csv"))
+                    label_file.write(f"{current},{_num_from_label(type)},{type[0]},{type[1]}\n")
+                current += 1
 
         if update:
             label_file.flush()
     
-    tuple = _to_traindata(bif_max, simulations, BifCounts(counts))
+    print("Batch", batch_num, "finished generating")
+        
+    simsresids = {i:(sims, resids) for i, (sims, resids, _) in simulations.items()}
+
+    df_labels: pd.DataFrame = pd.DataFrame(
+        (
+            (i, _num_from_label(label), label[0], label[1])
+            for i, (_, _, label) in simulations.items()
+        ), columns = LABEL_COLS,
+    )
+    
+    df_groups = _create_groups(df_labels, bif_max)
+    
+    if path is not None:
+        df_labels.to_csv(os.path.join(path, "labels.csv"), index=False)
+        df_groups.to_csv(os.path.join(path, "groups.csv"), index=False)
+        
+        # shutil.make_archive(os.path.join('output_sims.zip'), 'zip', sims_path)
+        # shutil.make_archive(os.path.join('output_resids.zip'), 'zip', resids_path)
     
     print("Batch", batch_num, "finished")    
-    return tuple
-
-
-# Returns combined (list(sims, resids), labels, groups)
-def combine(batches: Iterable[_TrainData]) -> _TrainData:
-    
-    def _reduce_combine(
-        a: _TrainData, 
-        b: _TrainData
-    ) -> _TrainData:
-        new_labels = b[1].copy()
-        new_labels['sequence_ID'] += len(a[0])
-        new_groups = b[2].copy()
-        new_groups['sequence_ID'] += len(a[0])
-        return (a[0] + b[0], pd.concat([a[1], new_labels]), pd.concat([a[2], new_groups]))
-    
-    return reduce(_reduce_combine, batches)
+    return simsresids, df_labels, df_groups, counts
 
 # Returns (list(sims, resids), labels, groups)
 def multibatch(
@@ -891,13 +863,14 @@ def multibatch(
         bif_max: int,
         batch_pool: Executor, 
         max_task_count: Callable[[Executor], int] = _max_task_count,
-        path: Union[str, None] = None, 
-    ) -> _TrainData:
+        path: Union[str, None] = None,
+        save: bool = True,
+    ) -> TrainData:
         
     if any(b <= 0 for b in batches):
         raise ValueError("Input batch numbers contains a value less than or equal to 0!")
     
-    combiner = lambda: combine(
+    generator = lambda: combine(
             batch_pool.map(
                 batch, 
                 batches, 
@@ -916,33 +889,28 @@ def multibatch(
             max_task_count=max_task_count,
         )])
         
-    if path is None:
-        return combiner()
-    else:
-        save(os.path.join(path, "combined/"), combiner)
-
-def save(path, generator: Callable[[], _TrainData]) -> _TrainData:
-    
-    os.makedirs(path, exist_ok=True)
-    
-    simsresids, labels, groups = generator()
-    
-    sims_path = os.path.join(path, "output_sims/")
-    os.makedirs(sims_path, exist_ok=True)
-    resids_path = os.path.join(path, "output_resids/")
-    os.makedirs(resids_path, exist_ok=True)
-    for i in labels['sequence_ID']:
-        sim, resids = simsresids[i - 1]
-        sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
-        resids.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
+    if path is None or not save:
+        return generator()
+    else:    
+        simsresids, labels, groups = generator()   
         
-    shutil.make_archive(os.path.join('output_sims.zip'), 'zip', sims_path)
-    shutil.make_archive(os.path.join('output_resids.zip'), 'zip', resids_path)
+        os.makedirs(path, exist_ok=True)
         
-    labels.to_csv(os.path.join(path, "labels.csv"), index=False)
-    groups.to_csv(os.path.join(path, "groups.csv"), index=False)
-    
-    return simsresids, labels, groups
+        sims_path = os.path.join(path, "output_sims/")
+        os.makedirs(sims_path, exist_ok=True)
+        resids_path = os.path.join(path, "output_resids/")
+        os.makedirs(resids_path, exist_ok=True)
+        for i in labels[INDEX_COL]:
+            sim, resids = simsresids[i]
+            sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
+            resids.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
+            
+        shutil.make_archive(os.path.join('output_sims.zip'), 'zip', sims_path)
+        shutil.make_archive(os.path.join('output_resids.zip'), 'zip', resids_path)
+            
+        labels.to_csv(os.path.join(path, "labels.csv"), index=False)
+        groups.to_csv(os.path.join(path, "groups.csv"), index=False)
+        return simsresids, labels, groups
 
 def _new_sim_pool():
     return concurrent.futures.ThreadPoolExecutor()
@@ -958,6 +926,7 @@ def run_with_args(max_task_count: Callable[[Executor], int] = _max_task_count):
     parser.add_argument('-s', '--batch-start', type=int, default=1)
     parser.add_argument('-l', '--length', type=int)
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
+    parser.add_argument('-c', '--combine', type=bool, default=True)
     args = parser.parse_args()
     
     p = _new_pool()

@@ -1,6 +1,8 @@
 import os
-from typing import Self, Union, Callable, Any
+from typing import Final, Self, Sequence, Union, Callable, Any
 import keras
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -11,20 +13,28 @@ from processing import Dataset, Model
 from keras.models import load_model, Sequential
 import ewstools
 
-class LSTMModels:
+class LSTM:
     
     def __init__(self: Self, path: str, extension: str = ".h5"):
         root_path = get_project_path(path)
         self._500models = [load_model(root_path + "len500/" + name) for name in os.listdir(root_path + "len500/") if name.endswith(extension)]
         self._1500models = [load_model(root_path + "len1500/" + name) for name in os.listdir(root_path + "len1500/") if name.endswith(extension)]
     
-    def get_models(self: Self, series: pd.Series):
+    def _get_models(self: Self, series: pd.Series):
         return self._1500models if len(series) > 500 else self._500models
+    
+    def with_args(
+        self: Self,
+        thresholds: list[float],
+        prominence: float,
+        distance: int,
+    ):
+       return _LSTM(self._get_models, thresholds, prominence, distance) 
     
 
 # Make sure to do linear interpolation before using
 
-class LSTM(Model):
+class _LSTM(Model):
         
     def __init__(
         self,
@@ -32,7 +42,7 @@ class LSTM(Model):
         thresholds: list[float],
         prominence: float,
         distance: int,
-        ):
+    ):
         super().__init__("CNN-LSTM")
         
         self.get_models = get_models
@@ -40,7 +50,7 @@ class LSTM(Model):
         self.prominence = prominence
         self.distance = distance
         
-    def __compute_ews(dataset: Dataset, dic_bandwith: dict) -> list[pd.DataFrame]:
+    def _compute_ews(dataset: Dataset, dic_bandwith: dict) -> list[pd.DataFrame]:
 
         # # Bandwidth sizes for Gaussian kernel (used in Dakos (2008) Table S3)
         # dic_bandwidth = {
@@ -84,9 +94,9 @@ class LSTM(Model):
         # # Export
         return df_ews
         
-    def __classify(self, dataset: Dataset):
+    def _classify(self, dataset: Dataset):
         
-        df_ews_forced = self.__compute_ews(dataset)
+        df_ews_forced = self._compute_ews(dataset)
         
         series = df_ews_forced["residuals"]
         
@@ -133,42 +143,40 @@ class LSTM(Model):
         )
         
         
-    TITLES = ["Fold", "Hopf", "Transcritical", "Mean Probability"]
+    TITLES: Final[list[str]] = ["Fold", "Hopf", "Transcritical", "Mean Probability"]
 
-    def runner(
-        self,
-        datasets: list[Dataset],
-    ):        
-        results = [(dataset, self.__classify(dataset)) for dataset in datasets]
+    def _run(
+        self: Self,
+        dataset: Dataset,
+    ): 
+        return self._classify(dataset)    
 
-        def print_single(tup: tuple):
-            dataset, (preds, means, points) = tup
+    def _print(self: Self, dataset: Dataset):
+        preds, means, points = self.results[dataset]
 
-            for i, points in enumerate(points):
-                print(f"Detected {len(points)} {self.TITLES[i]} points:")
-                for point in points:
-                    print(f"{preds[point][i]} at {preds[point]} {dataset.age_format}")
-            
-        def plot_single(tup: tuple):
-            dataset, (preds, means, points) = tup
-                    
-            fig = plt.figure(4, 12, sharex = True)
-            fig.suptitle(f"Bifurcation classifications on {dataset.name}")
-            subplots = fig.subplots(nrows=4, ncols=1, sharex=True)
-            for i, ax in enumerate(subplots):
-                ax.invert_xaxis()
-                ax.set_title(self.TITLES[i])
-                ax.set_xlabel(f"Age ({dataset.age_format})")
-                ax.set_ylabel("Probability")
-                ax.plot(preds[i] if i != 3 else means, preds["Time"])
-                if i != 3:
-                    ax.scatter(points, preds["Time"])
+        for i, points in enumerate(points):
+            print(f"Detected {len(points)} {self.TITLES[i]} points:")
+            for point in points:
+                print(f"{preds[point][i]} at {preds[point]} {dataset.age_format}")
+        
+    def _plot(self: Self, dataset: Dataset) -> Figure:
+        preds, means, points = self.results[dataset]
                 
-                for threshold in self.thresholds:
-                    ax.axhline(threshold, linestyle="--")
-
-            return fig
+        fig = plt.figure(4, 12, sharex = True)
+        fig.suptitle(f"Bifurcation classifications on {dataset.name}")
+        subplots: Sequence[Axes] = fig.subplots(nrows=4, ncols=1, sharex=True)
+        for i, ax in enumerate(subplots):
+            ax.invert_xaxis()
+            ax.set_title(self.TITLES[i])
+            ax.set_xlabel(f"Age ({dataset.age_format})")
+            ax.set_ylabel("Probability")
+            ax.plot(preds[i] if i != 3 else means, preds["Time"])
+            if i != 3:
+                ax.scatter(points, preds["Time"])
             
-        return (lambda: map(print_single, results), lambda: list(map(plot_single, results)))
+            for threshold in self.thresholds:
+                ax.axhline(threshold, linestyle="--")
+
+        return fig
 
     

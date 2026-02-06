@@ -11,7 +11,10 @@ Lisiecki = Dataset(
     name="Lisiecki (2005)",
     df=lambda: pd.read_csv(data_path("lisiecki2005-d18o-stack-noaa.csv"), comment='#', header=0, sep='\t'),
     age_col="age_calkaBP",
-    feature_cols=["d18O_benthic", "d18O_error"],
+    feature_cols={
+        "d18O_benthic" : "benthic d18O records",
+        "d18O_error" : "error"
+    },
     transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=1),
     age_scale=1000,
 )
@@ -31,58 +34,23 @@ Scotese = Dataset(
     age_scale=1000000,
 )
 
-# LSTM = LSTMModels()
-# LSTM.with_args().run([Scotese])
-
-# DLM = DLM()
-# Metrics(
-#     seq_len = 50,
-# ).run([Scotese])
-
-HMM().run([Scotese])
-
-        # hmm(
-        #     min_covar=1e-4,
-        #     p_threshold=0.7,
-        #     min_state_duration=30,
-        #     min_duration_between_switches=50,
-        # ),
-        # lstm(
-        #     seq_len=16,
-        #     train=0.4,
-        #     threshold=[.925, .95, .99],
-        #     epochs=300
-        # ),
-    
-# run_models_on_data(
-#     name="Judd et. al. (2024)",
-#     df=lambda: pd.read_csv(data_path("PhanDA_GMSTandCO2_percentiles.csv")),
-#     age_col="AverageAge",
-#     feature_cols=[
-#         "GMST_05", "GMST_95",
-#         "GMST_16", "GMST_84",
-#         "GMST_50",
-#         "CO2_05", "CO2_95",
-#         "CO2_16", "CO2_84",
-#         "CO2_50",
-#     ],
-#     transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=2),
-#     models=[
-#         hmm(
-#             n_regimes=3
-#         ),
-#         lstm(
-#             seq_len=16,
-#             train=0.35,
-#             threshold=95,
-#             epochs=400,
-#             patience=35,
-#             distance=30,
-#         ),
-#     ]
-# )    
+Judd = Dataset(
+    name="Judd et. al. (2024)",
+    df=lambda: pd.read_csv(data_path("PhanDA_GMSTandCO2_percentiles.csv")),
+    age_col="AverageAge",
+    feature_cols=[
+        "GMST_05", "GMST_95",
+        "GMST_16", "GMST_84",
+        "GMST_50",
+        "CO2_05", "CO2_95",
+        "CO2_16", "CO2_84",
+        "CO2_50",
+    ],
+    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=2),
+    age_scale=1000000,    
+)    
       
-# run_models_on_data(
+# Foster = Dataset(
 #     name="Foster, G. L., et al. (2017)",
 #     df=lambda: pd.read_excel(data_path("41467_2017_BFncomms14845_MOESM2874_ESM.xlsx"), sheet_name="proxies", header=[1,2,3]),
 #     age_col=('Age', '(Ma)'),
@@ -93,17 +61,17 @@ HMM().run([Scotese])
 #         "T (-1.08‰) arag, bel corr"
 #     ],
 #     transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=2),
-#     models=[
-#         hmm(),
-#         lstm(
-#             seq_len=32,
-#             train=0.4,
-#             threshold=99,
-#             epochs=150,
-#             patience=30,            
-#         ),
-#     ],
+#     age_scale=1000000,
 # )
+
+# Run models on datasets
+
+# LSTM = LSTM()
+# LSTM.with_args().run([Scotese])
+Metrics(window = 0.2).run([Lisiecki, Scotese, Judd])
+DLM().run([Lisiecki, Scotese, Judd])
+HMM().run([Lisiecki, Scotese, Judd])
+
 
 # def PhanSST():
 

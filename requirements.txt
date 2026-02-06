@@ -1,11 +1,16 @@
 matplotlib==3.10.8
-openpyxl==3.1.5
-atomics==1.0.3
-pycont-lite==0.6.0
-pybats==0.0.5
 tensorflow==2.20.0
 pandas==2.3.3
 scikit-learn==1.8.0
-ewstools==2.1.2
+# Datasets
+openpyxl==3.1.5
+# LSTM
+atomics==1.0.3
+pycont-lite==0.6.0
 ruptures==1.1.10
+# HMM
 hmmlearn==0.3.3
+# DLM
+pydlm==0.1.1.13
+# Metrics
+ewstools==2.1.2

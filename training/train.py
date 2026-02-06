@@ -9,62 +9,212 @@ Modified model training script for the tipping point-detecting deep learning mod
 
 """
 
-# def train_lstm_from_data(
-#     data,
-#     seq_len: int,
-#     train: Union[int, float],
-#     epochs: int,
-#     patience: int = 30,
-#     batch_size: int = 32,
-#     kernel_initializer: str = 'lecun_normal',
-#     optimizer: Optimizer = Adam(learning_rate = 0.0005),
-# ):
+import os
+import os.path
+import random
+from typing import Literal, Union
+import numpy as np
+import pandas as pd
 
-#     if float(train) <= 0.0:
-#         raise ValueError("Negative or zero training value provided!")
+from util import TrainData, combine
+
+from keras.models import Sequential  # type: ignore
+from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input  # type: ignore
+from keras.optimizers import Optimizer, Adam
+from keras.callbacks import EarlyStopping, ModelCheckpoint  # type: ignore
+from keras.losses import SparseCategoricalCrossentropy
+
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score, classification_report
+
+def _read_batch(dir) -> tuple[TrainData, int]:
+    print(f"Reading {dir}...")
+    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col="sequence_ID") 
     
-#     n_train: int = int(min(train, 1.0) * len(ages)) if isinstance(train, float) else max(int(train), len(ages))
+    if len(groups) == 0:
+        raise RuntimeError("Empty labels file!")
 
-#     Y_train, X_train = ages[:n_train], seq_features[:n_train].reshape(n_train, features.shape[1], 1)
+    simsresids = {seq_id:(
+        pd.read_csv(os.path.join(dir, f"output_sims/tseries{seq_id}.csv")), 
+        pd.read_csv(os.path.join(dir, f"output_resids/resids{seq_id}.csv")), 
+    ) for seq_id in groups.index.values}
     
-#     Y_val, X_val = ages[n_train:], seq_features[n_train:].reshape(-1, features.shape[1], 1)
+    ts_len = len(next(iter(simsresids.values()))[0])
     
-#     model = Sequential([
-#         Input(shape=(features.shape[1], 1)),
-#         Conv1D(
-#             filters=50, 
-#             kernel_size=12,
-#             padding="same",
-#             activation="relu",
-#             kernel_initializer=kernel_initializer,
-#         ),
-#         Dropout(0.1),
-#         MaxPooling1D(pool_size = 2),
-#         LSTM(50, return_sequences=True, kernel_initializer = kernel_initializer),
-#         Dropout(0.1),
-#         LSTM(10, kernel_initializer = kernel_initializer),
-#         Dense(4, activation='softmax', kernel_initializer = kernel_initializer)
-#     ])
-
-#     model.compile(
-#         loss=SparseCategoricalCrossentropy(), 
-#         optimizer=optimizer, 
-#         metrics=['accuracy']
-#     )
+    print("Read", dir)
     
-#     history = model.fit(
-#         x=X_train,
-#         y=Y_train,
-#         epochs=epochs,
-#         batch_size=batch_size,
-#         callbacks=[EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)],
-#         validation_data=(X_val, Y_val),
-#         verbose=True,
-#     )
+    return (simsresids, pd.read_csv(os.path.join(dir, "labels.csv"), index_col="sequence_ID"), groups), ts_len
 
-##############################################
+def _read_input_folder(input: str) -> tuple[TrainData, int]:
+    try:
+        entries = os.listdir(input)
+        if "groups.csv" in entries:
+            batches, ts_len = _read_batch(input)
+        else:
+            batches = [entry for entry in entries if os.path.exists(os.path.join(input, entry, "groups.csv"))]
+            if len(batches) == 0:
+                raise RuntimeError(f"Input folder {input} contains no batches in entries: {entries}")
+            batches = [_read_batch(os.path.join(input, entry)) for entry in entries] 
+            ts_len = batches[0][-1]
+            if not all(ts_len == other_len for _, other_len in batches):
+                raise RuntimeError(f"Input series lengths are different! {list(other_len for _, other_len in batches)}")
+            batches = combine(b[0] for b in batches)
+            
+    except Exception as e:
+        raise RuntimeError("Could not read input folder with error:", e) 
+    
+    return batches, ts_len
 
-# TODO!
+def train_lstm_from_batches(
+    input: str,
+    output: Union[str, None],
+    type: Literal["lpad", "lrpad"],
+    epochs: int,
+    patience: int = 30,
+    batch_size: int = 32,
+    filters: int = 50,
+    kernel_size: int = 12,
+    kernel_initializer: str = 'lecun_normal',
+    optimizer: Optimizer = Adam(learning_rate = 0.0005),
+) -> Sequential:
+    output = input if output is None else output
+    
+    batches, ts_len = _read_input_folder(input)
+                
+    simsresids, df_targets, df_groups = batches
+    
+    print("Setting up training data...")
+    
+    match type:
+        case "lrpad":
+            pad_left = 225 if ts_len == 500 else 725
+            pad_right = 225 if ts_len == 500 else 725
+        case "lpad":
+            pad_left = 450 if ts_len == 500 else 1450
+            pad_right = 0
+
+    sequences: list[np.ndarray] = list()
+    for _, df in simsresids.values():
+        values = df[["Residuals"]].to_numpy(copy=True)
+        
+        # Padding and normalizing input sequences
+        values[:int(pad_left * random.uniform(0, 1))] = 0
+        values[:ts_len - int(pad_right * random.uniform(0, 1))] = 0
+        
+        total_sum = sum(abs(values))
+        count = np.count_nonzero(values)
+        values /= total_sum / count
+        
+        sequences.append(values)
+
+    sequences = np.array(sequences)
+
+    # apply train/test/validation labels
+    
+    labelled_seq = lambda label: np.array((
+        sequences[i]
+        for i, tsid in enumerate(simsresids.keys())
+        if df_groups["dataset_ID"].loc[tsid] == label
+    ))
+    
+    train = labelled_seq(1)
+    validation = labelled_seq(2)
+    test = labelled_seq(3)
+    
+    labelled_class_seq = lambda label: np.array((
+        df_targets["class_label"].loc[tsid]
+        for tsid in simsresids.keys()
+        if df_groups["dataset_ID"].loc[tsid] == label
+    ))
+    
+    train_target = labelled_class_seq(1)
+    validation_target = labelled_class_seq(2)
+    test_target = labelled_class_seq(3)
+    
+    print("Compiling model...")
+    
+    model = Sequential([
+        Input(shape=(train.shape[1], 1)),
+        Conv1D(
+            filters=filters, 
+            kernel_size=kernel_size,
+            padding="same",
+            activation="relu",
+            kernel_initializer=kernel_initializer,
+        ),
+        Dropout(0.1),
+        MaxPooling1D(pool_size = 2),
+        LSTM(50, return_sequences=True, kernel_initializer = kernel_initializer),
+        Dropout(0.1),
+        LSTM(10, kernel_initializer = kernel_initializer),
+        Dense(4, activation='softmax', kernel_initializer = kernel_initializer)
+    ])
+
+    model.compile(
+        loss=SparseCategoricalCrossentropy(), 
+        optimizer=optimizer, 
+        metrics=['accuracy']
+    )
+    
+    print("Fitting model...")
+    
+
+    def name(object: str, ext: str):
+        return f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.{ext}"
+    
+    model_name = name("model", "h5")
+    
+    history = model.fit(
+        x=train,
+        y=train_target,
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=[EarlyStopping(monitor="val_accuracy", patience=patience, restore_best_weights=True), ModelCheckpoint(model_name, monitor="val_accuracy", save_best_only=True, mode="max", verbose=1)],
+        validation_data=(validation, validation_target),
+        verbose=True,
+    )
+    
+    print("Outputting model...")
+    
+    model.save(os.path.join(output, model_name))
+    
+    print("Testing model...")
+    
+    # generate test metrics
+
+    test_preds = model.predict(test).argmax(axis=-1)
+    accuracy_score(test_target, test_preds)
+    
+    output = f"""Simulation: 
+        Time Series Length: {ts_len}
+        Epochs: {epochs}
+        Kernel size: {kernel_size}
+        Filters: {filters}
+        Batch size: {batch_size}
+        learning_rate: {optimizer.learning_rate}
+        kernel_initializer: {kernel_initializer}
+        pad_left: {pad_left}
+        pad_right: {pad_right}
+        
+        macro f1: {f1_score(test_target, test_preds, average="macro")}
+        macro avg precision: {precision_score(test_target, test_preds, average="macro")}
+        macro avg recall: {recall_score(test_target, test_preds, average="macro")}
+        """
+    print(output)
+    print(classification_report(test_target, test_preds, digits=3))
+    print(history.history["accuracy"])
+    print(history.history["val_accuracy"])
+    print(history.history["loss"])
+    print(history.history["val_loss"])
+    print("Confusion matrix: \n", confusion_matrix(test_target, test_preds))# keeps track of training metrics
+
+    with open(name("training_results", "txt"), "w") as results:
+        results.write(output)
+        results.flush()
+        
+    return model
+
+
+#############################################
 
 def run_with_args():
     
@@ -72,9 +222,12 @@ def run_with_args():
     parser = argparse.ArgumentParser(
                     prog='LSTM Model Trainer',
                     description='Generates training data')
-    parser.add_argument('input', type=str)
-    parser.add_argument('output', type=str)
+    parser.add_argument('input', type=str, help="Path to a folder containing batches or a generated batch")
+    parser.add_argument('--output', '-o', type=str, help="Folder path to output models. If not provided, defaults to placing model beside training data.", default=None)
+    parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for", default=500)
     args = parser.parse_args()
+    
+    train_lstm_from_batches(args.input, args.output, type="lrpad", epochs=args.epochs)
     
 if __name__ == "__main__":
     run_with_args()
