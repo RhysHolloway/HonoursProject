@@ -7,48 +7,56 @@ def data_path(file: str):
 
 # Define datasets
  
-Lisiecki = Dataset(
+Lisiecki = Dataset.load(
     name="Lisiecki (2005)",
     df=lambda: pd.read_csv(data_path("lisiecki2005-d18o-stack-noaa.csv"), comment='#', header=0, sep='\t'),
     age_col="age_calkaBP",
     feature_cols={
         "d18O_benthic" : "benthic d18O records",
-        "d18O_error" : "error"
+        # "d18O_error" : "error"
     },
     transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=1),
     age_scale=1000,
 )
 
-Scotese = Dataset(
+Scotese = Dataset.load(
     name="Scotese et al. (2021)",
     df=lambda: pd.read_excel(data_path("Part 4. Phanerozoic_Paleotemperature_Summaryv4.xlsx"), sheet_name="Master", header=[0,1]),
     age_col=("Age", 'Unnamed: 0_level_1'),
     feature_cols=[
         ("Average", "Tropical"),
         ("Average", "Deep Ocean"), 
-        ("Average", "∆T trop"),
+        # ("Average", "∆T trop"),
         ("North", "Polar >67˚N"), 
         ("South", "Polar <67˚S")
     ],
-    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=1),
+    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=0.5),
     age_scale=1000000,
 )
 
-Judd = Dataset(
+GMST = [
+    "GMST_05", "GMST_95",
+    "GMST_16", "GMST_84",
+    "GMST_50"
+]
+
+CO2 = [
+    "CO2_05", "CO2_95",
+    "CO2_16", "CO2_84",
+    "CO2_50"
+]
+
+JuddGMST, JuddCO2 = Dataset.load(
     name="Judd et. al. (2024)",
     df=lambda: pd.read_csv(data_path("PhanDA_GMSTandCO2_percentiles.csv")),
     age_col="AverageAge",
-    feature_cols=[
-        "GMST_05", "GMST_95",
-        "GMST_16", "GMST_84",
-        "GMST_50",
-        "CO2_05", "CO2_95",
-        "CO2_16", "CO2_84",
-        "CO2_50",
-    ],
+    feature_cols=GMST + CO2,
     transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=2),
     age_scale=1000000,    
-)    
+).split({
+    "GMST": GMST,
+    "CO2": CO2,
+})  
       
 # Foster = Dataset(
 #     name="Foster, G. L., et al. (2017)",
@@ -66,49 +74,11 @@ Judd = Dataset(
 
 # Run models on datasets
 
-# LSTM = LSTM()
-# LSTM.with_args().run([Scotese])
-Metrics(window = 0.2).run([Lisiecki, Scotese, Judd])
-DLM().run([Lisiecki, Scotese, Judd])
-HMM().run([Lisiecki, Scotese, Judd])
+# Metrics(window = 0.2).run([Lisiecki, Scotese, Judd])
+# DLM().run([Lisiecki, Scotese, Judd])
+# HMM().run([Lisiecki, Scotese, Judd])
 
+loader = LSTMLoader(get_project_path("models/lstm/"), extension="h5")
+LSTM = loader.with_args(verbose=False)
 
-# def PhanSST():
-
-#     existing_cols = [
-#         # "MgCa", "SrCa", "MnSr",
-#         # "GDGT0", "GDGT1", "GDGT2", "GDGT3",
-#         # "BIT", "MI"
-#     ]
-    
-#     def transform(df, age_col, feature_cols): 
-#             df = df.pivot_table(index=[age_col], columns='ProxyType', values='ProxyValue', aggfunc="mean").join(
-#                 df.set_index([age_col])
-#                 [existing_cols]
-#                 .drop_duplicates()
-#             ).reset_index()
-#             df = prepare_df(df, age_col, feature_cols)
-#             return resample_df(df, age_col, feature_cols, step_years=0.1)
-
-#     detect_tipping_point(
-#         name="PhanSST",
-#         df=lambda: pd.read_csv(os.path.join(DATA_PATH, "PhanSST_v001.csv")),
-#         model=hmm_tipping_points(),
-#         # model=lstm_tipping_points(
-#         #     seq_len=30,
-#         #     train_fraction=0.4,
-#         #     threshold=95,
-#         #     latent_dim=32,
-#         #     batch_size=16,
-#         #     distance=10,
-#         #     epochs=200,
-#         #     patience=35,
-#         # ),
-#         transform=transform,
-#         age_col='Age',
-#         feature_cols=existing_cols + [
-#             "d18c", "d18p", "mg", "tex", "uk",
-#             # "ProxyValue"
-#         ],
-#         verbose=True
-#     )
+LSTM.run([Scotese, JuddGMST, JuddCO2])

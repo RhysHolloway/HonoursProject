@@ -18,7 +18,7 @@ class DLM(Model[dlm]):
         dataset: Dataset,
     ):
             
-        features = dataset.features()
+        features = dataset.features().to_numpy(copy=False)
         data = pd.Series(features[:,0], index=dataset.ages())
         extra_features = dynamic(features=features[:,1:], name='extra_features') if len(features) > 1 else None 
     
@@ -30,11 +30,7 @@ class DLM(Model[dlm]):
         if extra_features is not None:
             model = model + extra_features
             
-        
-        
         model.fitForwardFilter(useRollingWindow=True, windowLength=self.window)
-        
-        # return model
         
         return model
         
@@ -49,5 +45,5 @@ class DLM(Model[dlm]):
         for ax in fig.axes:
             ax.set_title(f"{self.name} of {dataset.name}")
             ax.invert_xaxis()
-            ax.set_xlabel(f"Age ({dataset.age_format()})")
+            ax.set_xlabel(f"Age ({dataset.age_format})")
         return fig

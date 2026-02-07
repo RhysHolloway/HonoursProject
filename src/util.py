@@ -5,7 +5,6 @@ import numpy as np
 np.random.seed(0)  # Set seed for reproducibility
 import pandas as pd
 
-
 def join_path(p, *args):
     return os.path.join(p, *args).replace("\\", "/")
 
@@ -17,7 +16,6 @@ def get_project_path(path: str):
     if not os.path.exists(dir):
             os.makedirs(dir)
     return path
-
 
 
 # FUNCTIONS TO TRANSFORM INPUT DATA
@@ -33,34 +31,3 @@ def resample_df(df: pd.DataFrame, age_col, feature_cols: list, steps: float = 1.
         new_df[col] = np.interp(new_ages, ages, df[col].values)
 
     return new_df
-
-# FUNCTIONS TO FILTER OUTPUT DATA
-
-def filter_points(points, ages, scores, min_distance: Union[float, int]):
-
-    # Sort peaks by descending height (strongest first)
-    order = np.argsort(-scores)
-    sorted_peaks = points[order]
-
-    kept = []
-    used = np.zeros(len(sorted_peaks), dtype=bool)
-
-    for i, p in enumerate(sorted_peaks):
-        if used[i]:
-            continue  # already removed due to being too close to a better peak
-
-        # keep this peak
-        kept.append(p)
-
-        # mask out all peaks within min_years
-        age_p = ages[p]
-        for j in range(i + 1, len(sorted_peaks)):
-            if used[j]:
-                continue
-            p2 = sorted_peaks[j]
-            if abs(ages[p2] - age_p) < min_distance:
-                used[j] = True
-
-    # return sorted in chronological order
-    kept = np.array(kept, dtype=int)
-    return kept[np.argsort(ages[kept])]

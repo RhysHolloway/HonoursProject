@@ -49,6 +49,7 @@ class Metrics(Model[_T]):
         def per_column(column: np.ndarray) -> tuple[_Metric, _Metric]:
                     
             features = pd.Series(np.array(column) / np.mean(np.abs(column)), index= -dataset.ages())[::-1]
+            
             features = ewstools.TimeSeries(features)
             features.detrend()
             
@@ -65,7 +66,7 @@ class Metrics(Model[_T]):
     
             return variance, ac1
         
-        variance, ac1 = zip(*(per_column(column) for column in dataset.features().T))
+        variance, ac1 = zip(*(per_column(column) for column in dataset.features().to_numpy(copy=False).T))
         
         update = lambda metric: None if any(series is None for series in metric) else list(metric)
         
@@ -94,7 +95,7 @@ class Metrics(Model[_T]):
             if i == 0:
                 axs[i].legend(dataset.feature_names())
             if i == rows - 1:
-                axs[i].set_xlabel(f"Age ({dataset.age_format()})")
+                axs[i].set_xlabel(f"Age ({dataset.age_format})")
             if data is not None:
                 names = dataset.feature_names()
                 for j, data in enumerate(data):

@@ -1,4 +1,4 @@
-from typing import Any, Literal, Optional, Self, Sequence
+from typing import Any, Literal, Optional, Self
 
 import logging
 logging.getLogger("hmmlearn.base").setLevel(logging.ERROR)
@@ -8,30 +8,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from hmmlearn.hmm import GaussianHMM
-from util import filter_points
 from processing import Model, Dataset
 
-def _filter_accepted_ages(prev_accepted, states, ages, post, p_threshold: Optional[float], min_state_duration):
-    accepted = []
-
-    for idx in prev_accepted:
-        age = ages[idx]
-        new_state = states[idx]
-
-        # enforce minimum duration in the new state (in years)
-        # find how long we stay in new_state starting at idx
-        j = idx
-        while j < len(states) and states[j] == new_state:
-            j += 1
-
-        end_age = ages[j-1] if j > idx else ages[idx]
-
-        if end_age - age >= min_state_duration and (p_threshold is None or post[idx, new_state] >= p_threshold):
-            accepted.append((idx, new_state))
-
-    return accepted
-
-_Results = tuple[GaussianHMM, int, float, Sequence, Sequence]
+_Results = tuple[GaussianHMM, int, float, np.ndarray]
 class HMM(Model[_Results]):
     
     def __init__(
@@ -129,7 +108,7 @@ class HMM(Model[_Results]):
     ):
             
         ages = dataset.ages()
-        features = dataset.features()
+        features = dataset.features().to_numpy(copy=False)
         
         n_regimes = self.n_regimes
         if n_regimes is None:
@@ -141,24 +120,13 @@ class HMM(Model[_Results]):
                 features=features,
             )
             
-        states = model.predict(features)
-        posterior = model.predict_proba(features)    
+        posterior = model.predict(features)
+        # https://hmmlearn.readthedocs.io/en/latest/auto_examples/plot_casino.html for predicting n regimes
         
-        switches = np.where(states[1:] != states[:-1])[0] + 1
-        
-        accepted = filter_points(
-            points=switches,
-            ages=ages,
-            scores=posterior[switches, states[switches]],
-            min_distance=self.min_duration_between_switches,
-        )
-        
-        accepted = _filter_accepted_ages(accepted, states, ages, posterior, self.p_threshold, self.min_state_duration)
-        
-        return model, n_regimes, bic, posterior, accepted
+        return model, n_regimes, bic, posterior
             
     def _print(self: Self, dataset: Dataset):
-        model, n_regimes, bic, posterior, accepted = self.results[dataset]
+        model, n_regimes, bic, posterior = self.results[dataset]
         ages = dataset.ages()
         
         c = "was unable to converge!" if not model.monitor_.converged else "was able to converge."
@@ -166,22 +134,19 @@ class HMM(Model[_Results]):
         
         print(f"Number of regimes: {n_regimes}")
 
-        print(f"Detected {len(accepted)} tipping points:")
-        for idx, state in accepted:
-            print(f"Age {ages[idx]:.2f} with posterior value {posterior[idx, state]:.2f}")
+        # print(f"Detected {len(accepted)} tipping points:")
+        # for idx, state in accepted:
+        #     print(f"Age {ages[idx]:.2f} with posterior value {posterior[idx, state]:.2f}")
 
     def _plot(self: Self, dataset: Dataset) -> Figure:
-        model, n_regimes, bic, posterior, accepted = self.results[dataset]
+        model, n_regimes, bic, posterior = self.results[dataset]
         ages = dataset.ages()
         fig = plt.figure()
         axs = fig.subplots()
         axs.set_title(f"HMM {dataset.name} (Regimes={n_regimes})")
         axs.set_ylabel("Posterior probability")
-        axs.set_xlabel(f"Age ({dataset.age_format()})")
+        axs.set_xlabel(f"Age ({dataset.age_format})")
         for k in range(posterior.shape[1]):
             axs.plot(ages, posterior[:, k], label=f"P(state={k})")
-        for a, state in accepted:
-            axs.axvline(ages[a], linestyle="--", alpha=0.7)
-            axs.text(ages[a], 1.1, f"{round(ages[a])} ({posterior[a, state]:.2f})", color='black', ha='center', va='bottom', rotation=90)
             
         return fig

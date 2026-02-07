@@ -14,6 +14,7 @@ Made to run using only one file, multithreaded, and without AUTO-07p
 import abc
 import builtins
 import copy
+import traceback
 import atomics
 import numpy as np
 import ruptures
@@ -242,11 +243,6 @@ SOLVER_PARAMETERS: Final[dict] = {
     "param_max": 5.0,
 }
 
-def _trace(e: BaseException):
-    import traceback
-    import sys
-    print(traceback.format_exception(type(e), e, e.__traceback__), file=sys.stderr, flush=True)
-
 type _Simulation = tuple[Sims, Resids, BifType]
 type _Simulations = dict[int, _Simulation]
 
@@ -309,7 +305,7 @@ def _gen_model(
                     case concurrent.futures.CancelledError | builtins.UnboundLocalError:
                         pass
                     case _:
-                        _trace(r)
+                        traceback.print_exception(r)
                         
     cancel()
         
@@ -754,7 +750,7 @@ def batch(
                                 case concurrent.futures.CancelledError:
                                     pass
                                 case _:
-                                    _trace(e)
+                                    traceback.print_exception(e)
         for task in tasks:
             task.cancel()
         
@@ -805,8 +801,8 @@ def batch(
                           
             label_file = open(labels_path, "a+")
                 
-        except BaseException as e:
-            _trace(e)
+        except Exception as e:
+            traceback.print_exception(e)
             
     print("Batch", batch_num, "loaded", len(simulations), "previous simulations")
     

@@ -38,4 +38,4 @@ else
     source "$PY_VENV_DIR/$VENV_SCRIPT"
 fi
 
-cd $DIR
+cd ..
