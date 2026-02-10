@@ -791,7 +791,7 @@ def batch(
         added = set()
         for result in results:
             type = result[2]
-            if counts.count(type) < bif_maximum(type=type, bif_max=bif_max) and type not in added:
+            if counts.count(type) < bif_maximum(type=type, bif_max=bif_max) and not (any((t, True) in added for t in BIFS) if type[1] else type in added):
                 simulations[current] = result
                 counts.inc(type)
                 added.add(type)
