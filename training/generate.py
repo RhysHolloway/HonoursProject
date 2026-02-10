@@ -308,7 +308,7 @@ def _gen_model(
                         traceback.print_exception(r)
                         
     cancel()
-        
+
     return simulations
 
 def _gen_branches_py(
@@ -396,27 +396,26 @@ def _simulate(
     # (transition can occur before the bifurcation is reached)
     series_len = ts_len + 200
     
-    # print(f"Found {len(branches)} branches")
-    
     for model in branches:
         
         # Pick sample spacing randomly from [0.1,0.2,...,1]
         dt_sample = np.random.choice(np.arange(1,11)/10)
         
-        for bif_type in bif_types():
+        for null in [True, False]:
+            
+            bif_type = (model['type'], null)
             
             if (
-                model['type'] == bif_type[0] and
-                (model_counts.null_count() if bif_type[1] else model_counts.count(bif_type)) == 0 and # Has this model not ran this (or another null sim if null) simulation yet
-                (total_counts.count(bif_type) + model_counts.count(bif_type)) < bif_maximum(type=bif_type, bif_max=bif_max)
+                total_counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max) and
+                (model_counts.null_count() if null else model_counts.count(bif_type)) == 0 # Has this model not ran this (or another null sim if null) simulation yet
             ):
                 df_out = _sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
-                            sigma=sigma, null_sim=bif_type[1])
+                            sigma=sigma, null_sim=null)
                 if df_out is None:
                     continue
                 trans_time = _trans_detect(df_out)
                         
-                if trans_time > ts_len and (model_counts.null_count() if bif_type[1] else 0) + model_counts._get(bif_type).fetch_inc() == 0:
+                if trans_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).fetch_inc() == 0:
                     df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
                     # Have time-series start at time t=0
                     df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
@@ -628,12 +627,6 @@ def _create_groups(
         max = bif_maximum(type=type, bif_max=bif_max)
         matches = df_labels[["bif", "null"]].eq(type).all(axis=1)
         df_labels = df_labels.drop(df_labels.index[matches & (matches.cumsum() > max)])
-        
-    
-    for type in bif_types():
-        max = bif_maximum(type=type, bif_max=bif_max)
-        matches = df_labels[["bif", "null"]].eq(type).all(axis=1)
-        df_labels = df_labels.drop(df_labels.index[matches & (matches.cumsum() > max)])
 
     #----------------------------
     # Create groups file in ratio for training:validation:testing
@@ -795,7 +788,6 @@ def batch(
     generator = single_generator() if pool is None or max_task_count(pool) // 10 == 0 else pool_generator(pool)
     
     for results in generator:
-        print("Batch", batch_num, "-", counts)
         update = False
         for result in results:
             type = result[2]
@@ -809,6 +801,8 @@ def batch(
                     label_file.write(f"{current},{_num_from_label(type)},{type[0]},{type[1]}\n")
                 current += 1
 
+        print("Batch", batch_num, "-", counts)
+        
         if update:
             label_file.flush()
     
@@ -849,6 +843,9 @@ def multibatch(
     if any(b <= 0 for b in batches):
         raise ValueError("Input batch numbers contains a value less than or equal to 0!")
     
+    if len(batches) == 0:
+        raise ValueError("Please provide a non empty batch list!")
+    
     generator = lambda: batch_pool.map(
             batch, 
             batches, 
@@ -857,7 +854,7 @@ def multibatch(
             [sim_pool] * len(batches), 
             [path] * len(batches),
         )  if len(batches) > 1 else [batch(
-            batch_num=1,
+            batch_num=batches[0],
             ts_len=ts_len, 
             bif_max=bif_max, 
             pool=sim_pool, 
@@ -894,12 +891,14 @@ def run_with_args():
                     prog='LSTM Training Data Generator',
                     description='Generates training data')
     parser.add_argument('output', type=str)
-    parser.add_argument('-b', '--batches', type=int)
+    parser.add_argument('-b', '--batches', type=int, default=1)
     parser.add_argument('-s', '--batch-start', type=int, default=1)
     parser.add_argument('-l', '--length', type=int)
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
     parser.add_argument('-c', '--combine', type=bool, default=True)
     args = parser.parse_args()
+    
+    batches = list(range(args.batch_start, args.batch_start + args.batches))
     
     import sys
     import threading
@@ -916,10 +915,13 @@ def run_with_args():
             
     sys.stdout = SelectOutput()
         
-    def printer_thread():
+    def set_printer_thread():
         threading.current_thread().name = "printer"
         
-    pool = concurrent.futures.ProcessPoolExecutor(initializer=printer_thread)
+    pool = concurrent.futures.ProcessPoolExecutor(initializer=set_printer_thread)
+    
+    if len(batches) == 1:
+        set_printer_thread()
 
     import atexit
     atexit.register(lambda: pool.shutdown(wait=False, cancel_futures=True))
@@ -927,7 +929,7 @@ def run_with_args():
     multibatch(
         batch_pool=pool, 
         sim_pool=concurrent.futures.ThreadPoolExecutor, 
-        batches=list(range(args.batch_start, args.batch_start + args.batches)), 
+        batches=batches, 
         ts_len=args.length, 
         bif_max=args.bifurcations,
         path=args.output, 
