@@ -3,9 +3,9 @@ from typing import Final, Iterable, Literal, Tuple
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
-type BifId = Literal["BP", "LP", "HB"]
+type BifId = Literal["HB", "BP", "LP"]
 type BifType = Tuple[BifId, bool]
-BIFS: Final[list[BifId]] = ["BP", "LP", "HB"]
+BIFS: Final[list[BifId]] = ["HB", "BP", "LP"]
 
 def bif_types():
     for null in [True, False]:
@@ -29,7 +29,7 @@ type Groups = pd.DataFrame
 type TrainData = tuple[dict[int, tuple[Sims, Resids]], Labels, Groups]
 
 # Returns combined (indexed sims + resids, labels, groups)
-def combine(batches: Iterable[TrainData]) -> TrainData:
+def combine_batches(batches: Iterable[TrainData]) -> TrainData:
     
     def _reduce_combine(
         a: TrainData, 

@@ -403,21 +403,20 @@ def _simulate(
         # Pick sample spacing randomly from [0.1,0.2,...,1]
         dt_sample = np.random.choice(np.arange(1,11)/10)
         
-        def sim(bif_type: BifType) -> bool:
+        for bif_type in bif_types():
             
             if (
+                model['type'] == bif_type[0] and
                 (model_counts.null_count() if bif_type[1] else model_counts.count(bif_type)) == 0 and # Has this model not ran this (or another null sim if null) simulation yet
-                model['type'] == bif_type[0] and 
                 (total_counts.count(bif_type) + model_counts.count(bif_type)) < bif_maximum(type=bif_type, bif_max=bif_max)
-                ):
+            ):
                 df_out = _sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
                             sigma=sigma, null_sim=bif_type[1])
                 if df_out is None:
-                    return False
+                    continue
                 trans_time = _trans_detect(df_out)
-                # Only if trans_time > ts_len, keep and cut trajectory
-                # print(f"Trans time {trans_time}")
-                if trans_time > ts_len and model_counts._get(bif_type).fetch_inc() + (model_counts.null_count() if bif_type[1] else 0) == 0:
+                        
+                if trans_time > ts_len and (model_counts.null_count() if bif_type[1] else 0) + model_counts._get(bif_type).fetch_inc() == 0:
                     df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
                     # Have time-series start at time t=0
                     df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
@@ -430,11 +429,7 @@ def _simulate(
                         # Label
                         bif_type,
                     ))
-                    return True
-            return False
-        
-        for bif_type in bif_types():
-            sim(bif_type=bif_type)
+                    break
     
     return sims
     
@@ -690,17 +685,6 @@ import os.path
 import os
 import shutil
 
-def _new_pool():
-    pool = concurrent.futures.ProcessPoolExecutor()
-        
-    def kill():
-        pool.shutdown(wait=False, cancel_futures=True)
-        
-    import atexit
-    atexit.register(kill)
-    
-    return pool
-
 def _num_from_label(t: BifType) -> int:
     if t[1]:
         return 3
@@ -711,19 +695,19 @@ def _num_from_label(t: BifType) -> int:
             case "HB":
                 return 1
             case "BP":
-                return 2
-            
-def _max_task_count(e: Executor) -> int:
-    return e._max_workers if e is concurrent.futures.ThreadPoolExecutor or e is concurrent.futures.ProcessPoolExecutor else os.cpu_count()
+                return 2    
 
 def batch(
     batch_num: int, 
     ts_len: int, 
     bif_max: int,
-    pool: Union[Executor, None, Callable[[], Executor]] = _new_pool(),
-    max_task_count: Callable[[Executor], int] = _max_task_count,
+    pool: Union[Executor, None, Callable[[], Executor]],
+    # max_task_count: Callable[[Executor], int],
     path: Union[None, str] = None,
     ) -> TrainData:
+    
+    def max_task_count(e: Executor) -> int:
+        return e._max_workers if e is concurrent.futures.ThreadPoolExecutor or e is concurrent.futures.ProcessPoolExecutor else os.cpu_count()
     
     def pool_generator(pool: Executor):
         tasks: list[Future[_ModelOutput]] = []
@@ -858,37 +842,32 @@ def multibatch(
         ts_len: int, 
         bif_max: int,
         batch_pool: Executor, 
-        max_task_count: Callable[[Executor], int] = _max_task_count,
         path: Union[str, None] = None,
-        save: bool = True,
+        combine: bool = True,
     ) -> TrainData:
         
     if any(b <= 0 for b in batches):
         raise ValueError("Input batch numbers contains a value less than or equal to 0!")
     
-    generator = lambda: combine(
-            batch_pool.map(
-                batch, 
-                batches, 
-                [ts_len] * len(batches), 
-                [bif_max] * len(batches), 
-                [sim_pool] * len(batches), 
-                [max_task_count] * len(batches),
-                [path] * len(batches),
-            )
-        ) if len(batches) > 1 else lambda: combine([batch(
+    generator = lambda: batch_pool.map(
+            batch, 
+            batches, 
+            [ts_len] * len(batches), 
+            [bif_max] * len(batches), 
+            [sim_pool] * len(batches), 
+            [path] * len(batches),
+        )  if len(batches) > 1 else [batch(
             batch_num=1,
             ts_len=ts_len, 
             bif_max=bif_max, 
             pool=sim_pool, 
             path=path,
-            max_task_count=max_task_count,
-        )])
+        )]
         
-    if path is None or not save:
+    if path is None or not combine:
         return generator()
     else:    
-        simsresids, labels, groups = generator()   
+        simsresids, labels, groups = combine_batches(generator())
         
         os.makedirs(path, exist_ok=True)
         
@@ -907,11 +886,8 @@ def multibatch(
         labels.to_csv(os.path.join(path, "labels.csv"), index=False)
         groups.to_csv(os.path.join(path, "groups.csv"), index=False)
         return simsresids, labels, groups
-
-def _new_sim_pool():
-    return concurrent.futures.ThreadPoolExecutor()
     
-def run_with_args(max_task_count: Callable[[Executor], int] = _max_task_count):
+def run_with_args():
     
     import argparse
     parser = argparse.ArgumentParser(
@@ -925,8 +901,39 @@ def run_with_args(max_task_count: Callable[[Executor], int] = _max_task_count):
     parser.add_argument('-c', '--combine', type=bool, default=True)
     args = parser.parse_args()
     
-    p = _new_pool()
-    multibatch(batch_pool=p, sim_pool=_new_sim_pool, batches=list(range(args.batch_start, args.batch_start + args.batches)), ts_len=args.length, bif_max=args.bifurcations, max_task_count=max_task_count, path=args.output)
+    import sys
+    import threading
+            
+    class SelectOutput():
+        out = sys.stdout
+
+        def write(self, text):
+            if threading.current_thread().name == "printer":
+                self.out.write(text)
+
+        def flush(self):
+            self.out.flush()
+            
+    sys.stdout = SelectOutput()
+        
+    def printer_thread():
+        threading.current_thread().name = "printer"
+        
+    pool = concurrent.futures.ProcessPoolExecutor(initializer=printer_thread)
+
+    import atexit
+    atexit.register(lambda: pool.shutdown(wait=False, cancel_futures=True))
+
+    multibatch(
+        batch_pool=pool, 
+        sim_pool=concurrent.futures.ThreadPoolExecutor, 
+        batches=list(range(args.batch_start, args.batch_start + args.batches)), 
+        ts_len=args.length, 
+        bif_max=args.bifurcations,
+        path=args.output, 
+        combine=args.combine
+    )
     
 if __name__ == "__main__":
+    
     run_with_args()
