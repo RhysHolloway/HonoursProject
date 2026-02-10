@@ -415,7 +415,7 @@ def _simulate(
                     continue
                 trans_time = _trans_detect(df_out)
                         
-                if trans_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).fetch_inc() == 0:
+                if trans_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).cmpxchg_strong(0, 1).success:
                     df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
                     # Have time-series start at time t=0
                     df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
@@ -788,23 +788,23 @@ def batch(
     generator = single_generator() if pool is None or max_task_count(pool) // 10 == 0 else pool_generator(pool)
     
     for results in generator:
-        update = False
+        added = set()
         for result in results:
             type = result[2]
-            if counts.count(type) < bif_maximum(type=type, bif_max=bif_max):
+            if counts.count(type) < bif_maximum(type=type, bif_max=bif_max) and type not in added:
                 simulations[current] = result
                 counts.inc(type)
+                added.add(type)
                 if label_file is not None:
-                    update = True
                     result[0].to_csv(os.path.join(path, f"output_sims/tseries{current}.csv"))
                     result[1].to_csv(os.path.join(path, f"output_resids/resids{current}.csv"))
                     label_file.write(f"{current},{_num_from_label(type)},{type[0]},{type[1]}\n")
                 current += 1
 
-        print("Batch", batch_num, "-", counts)
-        
-        if update:
-            label_file.flush()
+        if len(added) != 0:
+            print("Batch", batch_num, "-", counts)
+            if label_file is not None:
+                label_file.flush()
     
     print("Batch", batch_num, "finished generating")
         
