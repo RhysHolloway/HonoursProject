@@ -12,6 +12,8 @@ During the first run the script creates a virtual Python environment and downloa
 
 ### Identifying tipping points through classification of bifurcations in a time-series by a deep learning model.
 
+There exists a Bash script `generate_lstm_models.sh` that automatically runs all of the commands below. If being run with SLURM, use the flags `--cpus-per-task` with a minimum value of 11, `--overcommit`, and `--hint=multithread`, and provide access to a GPU with `--gpus 1`.
+
 #### Generation of the training set
 
 In order to produce results, the model needs to be trained, and that data needs to be generated.

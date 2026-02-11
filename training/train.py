@@ -16,7 +16,7 @@ from typing import Final, Literal, Union
 import numpy as np
 import pandas as pd
 
-from util import TrainData, combine
+from util import TrainData, combine_batches
 
 from keras.models import Sequential  # type: ignore
 from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input  # type: ignore
@@ -57,7 +57,7 @@ def _read_input_folder(input: str) -> tuple[TrainData, int]:
             ts_len = batches[0][-1]
             if not all(ts_len == other_len for _, other_len in batches):
                 raise RuntimeError(f"Input series lengths are different! {list(other_len for _, other_len in batches)}")
-            batches = combine(b[0] for b in batches)
+            batches = combine_batches(b[0] for b in batches)
             
     except Exception as e:
         raise RuntimeError("Could not read input folder with error:", e) 
@@ -232,9 +232,10 @@ def run_with_args():
     parser.add_argument('--name', '-n', type=int, help="Model name", default="best_model")
     parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for", default=500)
     parser.add_argument('--patience', '-p', type=int, help="Cancel training after a given number of epochs if the model does not improve since then", default=50)
+    parser.add_argument('--type', '-t', type=str, help="Type of zero-padding to use training the model", default="lrpad")
     args = parser.parse_args()
     
-    train_lstm_from_batches(args.input, args.output, type="lrpad", epochs=args.epochs, patience=args.patience)
+    train_lstm_from_batches(args.input, args.output, type=args.type, epochs=args.epochs, patience=args.patience)
     
 if __name__ == "__main__":
     run_with_args()
