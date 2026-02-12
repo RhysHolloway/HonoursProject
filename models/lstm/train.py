@@ -16,7 +16,7 @@ from typing import Final, Literal, Union
 import numpy as np
 import pandas as pd
 
-from util import TrainData, combine_batches
+from training import TrainData, combine_batches
 
 from keras.models import Sequential  # type: ignore
 from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input  # type: ignore

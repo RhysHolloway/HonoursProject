@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from hmmlearn.hmm import GaussianHMM
-from processing import Model, Dataset
+from models import Model, Dataset
 
 _Results = tuple[GaussianHMM, int, float, np.ndarray]
 class HMM(Model[_Results]):
@@ -102,7 +102,7 @@ class HMM(Model[_Results]):
                 
         return best
     
-    def _run(
+    def run(
         self: Self,
         dataset: Dataset,
     ):
@@ -123,7 +123,7 @@ class HMM(Model[_Results]):
         posterior = model.predict(features)
         # https://hmmlearn.readthedocs.io/en/latest/auto_examples/plot_casino.html for predicting n regimes
         
-        return model, n_regimes, bic, posterior
+        self.results[dataset] = model, n_regimes, bic, posterior
             
     def _print(self: Self, dataset: Dataset):
         model, n_regimes, bic, posterior = self.results[dataset]

@@ -4,8 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from pydlm import dlm, trend, dynamic, autoReg
-
-from processing import Dataset, Model
+from models import Dataset, Model
 
 class DLM(Model[dlm]):    
     
@@ -13,7 +12,7 @@ class DLM(Model[dlm]):
         super().__init__("DLM")    
         self.window = window
 
-    def _run(
+    def run(
         self: Self,
         dataset: Dataset,
     ):
@@ -32,7 +31,7 @@ class DLM(Model[dlm]):
             
         model.fitForwardFilter(useRollingWindow=True, windowLength=self.window)
         
-        return model
+        self.results[dataset] = model
         
     def _print(self: Self, dataset: Dataset):
         pass

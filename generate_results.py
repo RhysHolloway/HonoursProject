@@ -1,12 +1,25 @@
-from models import *
-from processing import Dataset
-from util import resample_df, get_project_path, pd
+import models
+from models import Dataset
+from models.lstm import LSTM, LSTMLoader
+from models.metrics import Metrics
+import os.path
 
-def data_path(file: str):
+import pandas as pd
+
+# Get root project path
+def get_project_path(path: str):
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), path).replace("\\", "/")
+    dir = os.path.dirname(path)
+    if not os.path.exists(dir):
+            os.makedirs(dir)
+    return path
+
+def data_path(file: str) -> str:
     return get_project_path(f"data/{file}")
 
+output = get_project_path("output/plots")
+
 # Define datasets
- 
 Lisiecki = Dataset.load(
     name="Lisiecki (2005)",
     df=lambda: pd.read_csv(data_path("lisiecki2005-d18o-stack-noaa.csv"), comment='#', header=0, sep='\t'),
@@ -15,24 +28,22 @@ Lisiecki = Dataset.load(
         "d18O_benthic" : "benthic d18O records",
         # "d18O_error" : "error"
     },
-    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=1),
     age_scale=1000,
-)
+).transform(models.resample_df)
 
 Scotese = Dataset.load(
     name="Scotese et al. (2021)",
     df=lambda: pd.read_excel(data_path("Part 4. Phanerozoic_Paleotemperature_Summaryv4.xlsx"), sheet_name="Master", header=[0,1]),
     age_col=("Age", 'Unnamed: 0_level_1'),
-    feature_cols=[
-        ("Average", "Tropical"),
-        ("Average", "Deep Ocean"), 
+    feature_cols={
+        ("Average", "Tropical"): "Tropical Temperature",
+        ("Average", "Deep Ocean"): "Deep Ocean Temperature", 
         # ("Average", "∆T trop"),
-        ("North", "Polar >67˚N"), 
-        ("South", "Polar <67˚S")
-    ],
-    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=0.5),
+        ("North", "Polar >67˚N"): "North Polar Temperature", 
+        ("South", "Polar <67˚S"): "South Polar Temperature"
+    },
     age_scale=1000000,
-)
+).transform(lambda df, features: models.resample_df(df, features, steps=0.5))
 
 GMST = [
     "GMST_05", "GMST_95",
@@ -51,9 +62,8 @@ JuddGMST, JuddCO2 = Dataset.load(
     df=lambda: pd.read_csv(data_path("PhanDA_GMSTandCO2_percentiles.csv")),
     age_col="AverageAge",
     feature_cols=GMST + CO2,
-    transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=2),
     age_scale=1000000,    
-).split({
+).transform(lambda df, features: models.resample_df(df, features, steps=2)).split({
     "GMST": GMST,
     "CO2": CO2,
 })  
@@ -74,11 +84,11 @@ JuddGMST, JuddCO2 = Dataset.load(
 
 # Run models on datasets
 
-# Metrics(window = 0.2).run([Lisiecki, Scotese, Judd])
-# DLM().run([Lisiecki, Scotese, Judd])
-# HMM().run([Lisiecki, Scotese, Judd])
+# Metrics(window = 0.2).run_with_output([Lisiecki, Scotese, Judd], plot_path=output)
+# DLM().run_with_output([Lisiecki, Scotese, Judd], plot_path=output)
+# HMM().run_with_output([Lisiecki, Scotese, Judd], plot_path=output)
 
 loader = LSTMLoader(get_project_path("models/lstm/"), extension="h5")
 LSTM = loader.with_args(verbose=False)
 
-LSTM.run([Scotese, JuddGMST, JuddCO2])
+LSTM.run_with_output([Scotese, JuddGMST, JuddCO2], print=False, plot_path=output)

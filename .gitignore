@@ -1,5 +1,6 @@
-# data/
-output/
-env/
-
+/env/
 **/__pycache__/
+
+/.vscode/
+
+output/plots/

@@ -26,7 +26,7 @@ from concurrent.futures import Executor, Future
 import scipy.optimize._nonlin as nl
 import pycont
 
-from util import *
+from ..lstm import *
 
 def _generate_simulation(
     # Define convergence threshold
@@ -299,9 +299,9 @@ def _gen_model(
                         if "Jacobian inversion yielded zero vector." in str(r):
                             cancel()
                             return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations) 
-                    case nl.NoConvergence:
+                    case nl.NoConvergence | builtins.RecursionError:
                         cancel()
-                        return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations)
+                        return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations)                        
                     case concurrent.futures.CancelledError | builtins.UnboundLocalError:
                         pass
                     case _:
@@ -317,9 +317,10 @@ def _gen_branches_py(
         equi: np.ndarray[np.float64],
         steps: int = 500,
     ) -> list[dict]:
+    pars = pars.copy()
     initial = pars[par]
     
-    def G(u: np.ndarray[np.float64], p: np.float64, pars: np.ndarray[np.float64] = pars.copy()):
+    def G(u: np.ndarray[np.float64], p: np.float64):
         pars[par] = p
         
         x, y = u
@@ -346,7 +347,6 @@ def _gen_branches_py(
         'value': branch.termination_event.p, 
         'branch_vals':branch.termination_event.u,
         'initial_param':initial,
-        'param':par,
     } for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in BIFS]      
 
 def _simulate(
@@ -371,9 +371,10 @@ def _simulate(
     Detect transition point using change-point algorithm
     Ouptut time-series of ts_len time units prior to transition
 
-    """          
+    """   
      
     branches = _gen_branches_py(par, pars, equi)
+    pars = pars.copy()
 
     # Noise amplitude
     sigma_tilde = 0.01
@@ -396,12 +397,53 @@ def _simulate(
     # (transition can occur before the bifurcation is reached)
     series_len = ts_len + 200
     
-    for model in branches:
+    def de_fun(s: np.ndarray[np.float64], b: float) -> np.ndarray[np.float64]:
+            pars[par] = b
+            '''
+            Input:
+            s is state vector
+            pars is dictionary of parameter values
+            
+            Output:
+            array [dxdt, dydt]
+            
+            '''
+            
+            # Polynomial forms up to third order
+            x: np.float64=s[0]
+            y: np.float64=s[1]
+            polys: np.ndarray[np.float64] = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
+
+            dxdt: np.float64 = np.dot(pars[10:], polys)
+            dydt: np.float64 = np.dot(pars[:10], polys)
+                        
+            return np.array([dxdt, dydt])
+    
+    # Pick sample spacing randomly from [0.1,0.2,...,1]
+    dt_sample = np.random.choice(np.arange(1,11)/10)
         
-        # Pick sample spacing randomly from [0.1,0.2,...,1]
-        dt_sample = np.random.choice(np.arange(1,11)/10)
+    for null in [False, True]:
         
-        for null in [True, False]:
+        binit=model["initial_value"]
+        bcrit=model['value']
+        
+        null_location=0.0 if null else None
+        
+        # If a null simulation, simulate at a fixed value of b, given by b_null
+        if null_location is not None:
+            assert 0.0 <= null_location and null_location <= 1.0
+            # Set binit and bcrit for simulation as equal to b_null
+            binit += null_location*(bcrit-binit)
+            bcrit = binit
+        
+        simulator = StochSim(
+            binit=binit, 
+            bcrit=bcrit, 
+            ts_len=series_len,
+            dt_sample=dt_sample,
+        )
+        
+        for model in branches:
             
             bif_type = (model['type'], null)
             
@@ -409,10 +451,15 @@ def _simulate(
                 total_counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max) and
                 (model_counts.null_count() if null else model_counts.count(bif_type)) == 0 # Has this model not ran this (or another null sim if null) simulation yet
             ):
-                df_out = _sim_model(model, pars, equi, dt_sample=dt_sample, series_len=series_len,
-                            sigma=sigma, null_sim=null)
+                df_out = simulator.simulate(
+                    de_fun=de_fun,
+                    s0=equi, 
+                    sigma=sigma, 
+                )
+                
                 if df_out is None:
                     continue
+                
                 trans_time = _trans_detect(df_out)
                         
                 if trans_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).cmpxchg_strong(0, 1).success:
@@ -432,142 +479,8 @@ def _simulate(
     
     return sims
     
-# Throws floating point error
-def _sim_model(
-    model: dict, 
-    pars: np.ndarray[np.float64], 
-    equi: np.ndarray[np.float64], 
-    dt_sample: float, 
-    series_len: int, 
-    sigma: float, 
-    null_sim: bool, 
-    null_location=0,
-    dt: np.float64 = 0.01,
-    tburn = 100 # burn-in period
-    ) -> Union[None, pd.DataFrame]:
-    '''
-    Function to run a stochastic simulation of model up to bifurcation point
-    Input:
-        model (class) : contains details of model to simulate
-        dt_sample : time between sampled points (must be a multiple of 0.01)
-        series_len : number of points in time series
-        sigma (float) : amplitude factor of GWN - total amplitude also
-            depends on parameter values
-        null_sim (bool) : Null simulation (bifurcation parameter fixed) or
-            transient simulation (bifurcation parameter increments to bifurcation point)
-        null_location (float) : Value in [0,1] to determine location along bifurcation branch
-            where null is simulated. Value is proportion of distance to the 
-            bifurcation from initial point (0 is initial point, 1 is bifurcation point)
-    Output:
-        DataFrame of trajectories indexed by time
-    '''
-
-    pars = pars.copy()
-    
-    # Simulation parameters
-
-    t0 = 0
-#   seed = 0 # random number generation 
-    
-    # Bifurcation point of model
-    bcrit = model['value'] # bifurcation point
-    
-    # Initial value of bifurcation parameter
-    bl = model['initial_param']
-    
-    # If a null simulation, simulate at a fixed value of b, given by b_null
-    if null_sim:
-        b_null = bl + null_location*(bcrit-bl)
-        # Set bl and bh for simulation as equal to b_null
-        bl = b_null
-        bh = b_null
-    
-    # If a transient simulation, let b go from bl to bh, where bh is bifurcation point
-    else:
-        bh = bcrit
-    
-    s0 = equi    # initial condition
-
-    # Model equations
-
-    def de_fun(s:np.ndarray[np.float64]) -> np.ndarray[np.float64]:
-        '''
-        Input:
-        s is state vector
-        pars is dictionary of parameter values
-        
-        Output:
-        array [dxdt, dydt]
-        
-        '''
-        
-        # Polynomial forms up to third order
-        x: np.float64=s[0]
-        y: np.float64=s[1]
-        polys: np.ndarray[np.float64] = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
-
-        dxdt: np.float64 = np.dot(pars[10:], polys)
-        dydt: np.float64 = np.dot(pars[:10], polys)
-                      
-        return np.array([dxdt, dydt])
-        
-        
-    
-    # Initialise arrays to store single time-series data
-    t = np.arange(t0, series_len*dt_sample, dt)
-    s: np.ndarray[np.ndarray[np.float64]] = np.zeros([len(t),2])
-    
-   
-    # Set up bifurcation parameter b, that increases linearly in time from bl to bh
-    b = pd.Series(np.linspace(bl,bh,len(t)),index=t)   
-
-    ## Implement Euler Maryuyama for stocahstic simulation
-    
-    # Create brownian increments (s.d. sqrt(dt))
-    dW_burn = np.random.normal(loc=0, scale=sigma*np.sqrt(dt), size = [int(tburn/dt),2])
-    dW = np.random.normal(loc=0, scale=sigma*np.sqrt(dt), size = [len(t/dt),2])
-    
-    with np.errstate(over='raise'):
-        
-        # Run burn-in period on s0
-        period = int(tburn/dt)
-        for i in range(period):
-            try:
-                s0 = s0 + de_fun(s0)*dt + dW_burn[i]
-            except FloatingPointError:
-                # print("Overflowed while burning in from", s0)
-                return None
-            
-        # Initial condition post burn-in period
-        s[0] = s0
-        
-        # Run simulation
-        for i in range(len(t)-1):
-            try:
-                # Update bifurcation parameter
-                pars[model['param']] = b.iloc[i]
-                s[i+1] = s[i] + de_fun(s[i])*dt + dW[i]
-            except FloatingPointError:
-                for j in range(i+1, len(t)-1):
-                    s[j] = np.nan
-                break
-            
-    # Store series data in a DataFrame
-    data = {'Time': t,'x': s[:,0],'y': s[:,1], 'b':b.values}
-    df_traj = pd.DataFrame(data)
-    
-    # Filter dataframe according to spacing
-    df_traj_filt = df_traj.iloc[0::int(dt_sample/dt)].copy()
-    
-    # Replace time column with integers for compatibility
-    # with trans_detect
-    df_traj_filt['Time'] = np.arange(0,series_len)
-    df_traj_filt.set_index('Time', inplace=True)
-
-    return df_traj_filt
-    
 # Function to detect change points
-def _trans_detect(df_in):
+def _trans_detect(df_in: pd.DataFrame):
     '''
     Function to detect a change point in a time series
     Input:
@@ -576,7 +489,7 @@ def _trans_detect(df_in):
         float: time at which transition occurs
     '''
     # Check for a jump to Nan
-    df_nan = df_in[np.isnan(df_in['x'])]
+    df_nan: pd.DataFrame = df_in[np.isnan(df_in['x'])]
     if df_nan.size == 0:
         # Assign a big value to t_nan
         t_nan = 1e6
@@ -590,7 +503,7 @@ def _trans_detect(df_in):
         
         # First detrend the series (breakpoint detection is not working well with non-stationary data)
         span = 0.2
-        series_data = df_in.loc[:t_nan-1]['x']
+        series_data: pd.Series = df_in.loc[:t_nan-1]['x']
         smooth_data = lowess(series_data.values, series_data.index.values, frac=span)[:,1]
         # On rare occasion the smoothing function messes up
         # In this case output 0, and run new simulation
@@ -937,5 +850,4 @@ def run_with_args():
     )
     
 if __name__ == "__main__":
-    
     run_with_args()

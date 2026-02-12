@@ -4,14 +4,14 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
-from processing import Dataset, Model
+from models import Dataset, Model
 
 import ewstools
 
 type _Metric = Optional[pd.Series]
 
-type _T = tuple[Optional[list[pd.Series]]]
-class Metrics(Model[_T]):
+type MetricsResults = tuple[Optional[list[pd.Series]]]
+class Metrics(Model[MetricsResults]):
     
     def __init__(
         self, 
@@ -29,7 +29,7 @@ class Metrics(Model[_T]):
         if self.count == 0:
             raise ValueError("Please provide ")
     
-    def _run(
+    def run(
         self: Self,
         dataset: Dataset,
     ):
@@ -73,7 +73,7 @@ class Metrics(Model[_T]):
         variance = update(variance)
         ac1 = update(ac1)
         
-        return (variance, ac1)
+        self.results[dataset] = (variance, ac1)
         
     def _print(self: Self, dataset: Dataset):
         pass                   
