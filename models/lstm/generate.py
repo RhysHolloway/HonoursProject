@@ -614,8 +614,6 @@ def batch(
     
     print("Batch", batch_num, "start")
     
-    pool = pool() if callable(pool) else pool
-    
     simulations: _Simulations = dict()
     counts = _AtomicCounts()
     
