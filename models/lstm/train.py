@@ -17,7 +17,6 @@ from typing import Final, Literal, Union
 import numpy as np
 import pandas as pd
 import atomics
-import atomics.base
 
 from ..lstm import INDEX_COL, Sims, TrainData, combine_batches, compute_residuals
 
@@ -101,7 +100,7 @@ def train_lstm_from_batches(
 
     # apply train/test/validation labels
     
-    counter: atomics.base.AtomicUint = atomics.atomic(width=4, type=atomics.UINT)
+    counter = atomics.atomic(width=4, atype=atomics.UINT)
     counter.store(0)
     
     def to_traindata(tsid: int) -> np.ndarray:
