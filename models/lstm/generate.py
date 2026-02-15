@@ -544,7 +544,7 @@ def _create_groups(
     # Set group numbers for each classification
     def to_group(classifier: pd.DataFrame) -> pd.Series:
         assert bif_max == len(classifier)
-        return pd.Series(group_nums, index=classifier[INDEX_COL].to_numpy(), name = "dataset_ID")
+        return pd.Series(group_nums, index=classifier.index, name = "dataset_ID")
     
     return pd.concat((to_group(classifier) for _, classifier in df_labels.groupby('class_label')), sort=True)
 
