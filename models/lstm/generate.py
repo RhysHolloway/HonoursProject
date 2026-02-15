@@ -248,6 +248,10 @@ def _gen_model(
         simulations: _ModelOutput = [],
 ) -> _ModelOutput:
     
+    
+    with warnings.catch_warnings(action="ignore", category=scipy.integrate.ODEintWarning):
+        pars, equi, rrate = _generate_simulation()
+    
     model_counts = _AtomicCounts()
     
     # Multithread the parameter simuations
@@ -264,9 +268,6 @@ def _gen_model(
             model_counts
         ) for par in range(len(pars)) if pars[par] != 0.0
     ]
-    
-    with warnings.catch_warnings(action="ignore", category=scipy.integrate.ODEintWarning):
-        pars, equi, rrate = _generate_simulation()
 
     def retry():
         for task in tasks:
@@ -530,7 +531,7 @@ def _create_groups(
 
     # Create the file groups.csv with headers (sequence_ID, dataset_ID)
     # Use numbers 1 for training, 2 for validation and 3 for testing
-    # Use raito 38:1:1
+    # Use ratio 38:1:1
 
     # Compute number of bifurcations for each group
     num_validation = int(np.floor(bif_max*validation_percentage))
@@ -541,13 +542,11 @@ def _create_groups(
     group_nums = [1]*num_train + [2]*num_validation + [3]*num_test
     
     # Set group numbers for each classification
-    def to_group(classifier: pd.DataFrame) -> pd.DataFrame:
+    def to_group(classifier: pd.DataFrame) -> pd.Series:
         assert bif_max == len(classifier)
-        classifier = classifier[[INDEX_COL]]
-        classifier['dataset_ID'] = group_nums
-        return classifier
+        return pd.Series(group_nums, index=classifier[INDEX_COL].to_numpy(), name = "dataset_ID")
     
-    return pd.concat((to_group(classifier) for _, classifier in df_labels.groupby('class_label'))).sort_values(by=[INDEX_COL])
+    return pd.concat((to_group(classifier) for _, classifier in df_labels.groupby('class_label')), sort=True)
 
 ################################################################################
 
@@ -627,18 +626,18 @@ def batch(
             labels_path = os.path.join(path, "labels.csv")
             
             if not os.path.exists(labels_path):
-                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path, index=False)
+                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path)
             
             labels = pd.read_csv(labels_path)
             
-            for seq_id, bif, null in labels[[INDEX_COL, 'bif', 'null']].itertuples(index=False, name=None):
-                type: BifType = (bif, null)
-                if counts.count(type) < bif_maximum(type, bif_max):
+            for seq_id, bif, null in labels[['bif', 'null']].itertuples(index=True, name=None):
+                biftype: BifType = (bif, null)
+                if counts.count(biftype) < bif_maximum(biftype, bif_max):
                     simulations[seq_id] = (
                         pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv")),
                         (bif, null)
                     )
-                    counts.inc(type)
+                    counts.inc(biftype)
                 
             if len(simulations) > 0:
                 # ts_len is same between previous iterations and now
@@ -656,14 +655,14 @@ def batch(
     for results in generator():
         added = set()
         for result in results:
-            type = result[1]
-            if counts.count(type) < bif_maximum(type=type, bif_max=bif_max) and not (any((t, True) in added for t in BIFS) if type[1] else type in added):
+            biftype = result[1]
+            if counts.count(biftype) < bif_maximum(type=biftype, bif_max=bif_max) and not (any((t, True) in added for t in BIFS) if type[1] else type in added):
                 simulations[current] = result
-                counts.inc(type)
-                added.add(type)
+                counts.inc(biftype)
+                added.add(biftype)
                 if label_file is not None:
                     result[0].to_csv(os.path.join(path, f"sims/tseries{current}.csv"))
-                    label_file.write(f"{current},{_num_from_label(type)},{type[0]},{type[1]}\n")
+                    label_file.write(f"{current},{_num_from_label(biftype)},{biftype[0]},{biftype[1]}\n")
                 current += 1
 
         if len(added) != 0:
@@ -679,17 +678,17 @@ def batch(
         (
             (i, _num_from_label(label), label[0], label[1])
             for i, (_, label) in simulations.items()
-        ), columns = LABEL_COLS,
-    )
+        ), columns = [INDEX_COL] + LABEL_COLS,
+    ).set_index(INDEX_COL)
     
-    df_groups = _create_groups(df_labels, bif_max)
+    groups = _create_groups(df_labels, bif_max)
     
     if path is not None:
-        df_labels.to_csv(os.path.join(path, "labels.csv"), index=False)
-        df_groups.to_csv(os.path.join(path, "groups.csv"), index=False)
+        df_labels.to_csv(os.path.join(path, "labels.csv"))
+        groups.to_csv(os.path.join(path, "groups.csv"))
     
     print("Batch", batch_num, "finished")    
-    return sims, df_labels, df_groups, counts
+    return sims, df_labels, groups
 
 # Returns (sims, labels, groups)
 def multibatch(

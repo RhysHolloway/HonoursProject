@@ -235,11 +235,11 @@ def bif_maximum(type: BifType, bif_max: int) -> int:
         return bif_max
 
 INDEX_COL: Final[str] = 'sequence_ID'
-LABEL_COLS: Final[list[str]] = [INDEX_COL, 'class_label', 'bif', 'null']
+LABEL_COLS: Final[list[str]] = ['class_label', 'bif', 'null']
 
 type Sims = pd.Series
 type Labels = pd.DataFrame
-type Groups = pd.DataFrame
+type Groups = pd.Series
 type TrainData = tuple[dict[int, Sims], Labels, Groups]
 
 # Returns combined (indexed sims, labels, groups)
