@@ -1,113 +1,115 @@
-from typing import Any, Optional, Self, Sequence
+from typing import Any, Callable, Literal, Optional, Self, Sequence
 from matplotlib import pyplot
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
+import scipy.stats
 from models import Dataset, Model
 
 import ewstools
 
-type _Metric = Optional[pd.Series]
-
-type MetricsResults = tuple[Optional[list[pd.Series]]]
-class Metrics(Model[MetricsResults]):
+class Metrics(Model[pd.DataFrame]):
     
     def __init__(
         self, 
-        window: int,
-        variance: bool = True,
-        ac1: bool = True,
-        ):
+        window: float,
+        detrend_method: Literal["Gaussian", "Lowess"] = "Lowess",
+        ktau_distance: int | None = None,
+        transition = None,
+    ):
         super().__init__("Metric-based analysis")
+        assert 0.0 < window < 1.0
         
         self.window = window
-        self.variance = variance
-        self.ac1 = ac1
-        self.count = sum((self.variance, self.ac1))
+        self.detrend_method = detrend_method
+        self.ktau_distance = ktau_distance
+        self.transition = transition
+
+    # Compute kendall tau values at equally spaced time points
+    @staticmethod
+    def ktau(series: pd.Series, indices: Callable[[pd.Series], pd.Index] | pd.Index = lambda series: series.index, name: str | None = None) -> pd.Series:
+        indices = indices(series) if callable(indices) else indices
         
-        if self.count == 0:
-            raise ValueError("Please provide ")
+        # Get first non-NaN index in series
+        start = series[pd.notna(series)].index[1]
+        
+        def compute(t_end) -> float:
+            s = series.loc[start:t_end]
+            import warnings
+            with warnings.catch_warnings(action="ignore", category=scipy.stats._axis_nan_policy.SmallSampleWarning):
+                return scipy.stats.kendalltau(s.index.to_numpy(), s.to_numpy())[0]
+        
+        # Return series
+        return pd.Series(map(compute, indices), index=indices, name=name)
+    
+    def run_on_series(self: Self, series: pd.Series, transition = None) -> pd.DataFrame:
+        
+        ts = ewstools.TimeSeries(series, transition=transition or self.transition)
+        ts.detrend(method=self.detrend_method)
+        
+        ts.compute_var(rolling_window=self.window)
+        ts.compute_auto(lag=1, rolling_window=self.window)
+        
+        STATE_COLS = ["state", "smoothing", "residuals"]
+        EWS_COLS = ["variance", "ac1"]
+        
+        df = pd.concat([ts.state[STATE_COLS], ts.ews[EWS_COLS]], axis=1).rename({"state":"value"})
+        
+        if self.ktau_distance:
+            indices = df.index[::self.ktau_distance]
+            for col in EWS_COLS:
+                df["ktau_" + col] = self.ktau(df[col], indices)
+            
+        df.insert(0, "variable", series.name)
+
+        return df
     
     def run(
         self: Self,
         dataset: Dataset,
     ):
                         
-        def uniform(ages):
-            if not self.ac1:
-                return False
-            distance = ages[1] - ages[0]
-            for i in range(2, len(ages)):
-                if ages[i] - ages[i - 1] != distance:
-                    print(f"{dataset.name} is not uniform! Cannot compute autocorrelation.")
-                    return False
-            return True
+        # def uniform(ages):
+        #     if not self.ac1:
+        #         return False
+        #     distance = ages[1] - ages[0]
+        #     for i in range(2, len(ages)):
+        #         if ages[i] - ages[i - 1] != distance:
+        #             print(f"{dataset.name} is not uniform! Cannot compute autocorrelation.")
+        #             return False
+        #     return True
         
-        unif = uniform(dataset.ages())
-        
-        def per_column(column: np.ndarray) -> tuple[_Metric, _Metric]:
-                    
-            features = pd.Series(np.array(column) / np.mean(np.abs(column)), index= -dataset.ages())[::-1]
+        # unif = uniform(dataset.ages())
             
-            features = ewstools.TimeSeries(features)
-            features.detrend()
-            
-            if self.variance:
-                features.compute_var(rolling_window=self.window)
-                variance = features.ews['variance']
-            else:
-                variance = None
-            if self.ac1 and unif:
-                features.compute_auto(lag=1, rolling_window=self.window)
-                ac1 = features.ews['ac1']
-            else:
-                ac1 = None
-    
-            return variance, ac1
-        
-        variance, ac1 = zip(*(per_column(column) for column in dataset.features().to_numpy(copy=False).T))
-        
-        update = lambda metric: None if any(series is None for series in metric) else list(metric)
-        
-        variance = update(variance)
-        ac1 = update(ac1)
-        
-        self.results[dataset] = (variance, ac1)
+        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys()))
         
     def _print(self: Self, dataset: Dataset):
         pass                   
     
     def _plot(self: Self, dataset: Dataset) -> Figure:
         results = self.results[dataset]
-        rows = sum(metric is not None for metric in results)
-        fig = pyplot.figure(figsize=(8, 3 * rows))
+        ROWS = 5
+        fig = pyplot.figure(figsize=(6 * len(dataset.feature_cols), 3 * ROWS))
         fig.suptitle(dataset.name)
-        axs: Sequence[Axes] = fig.subplots(nrows=rows, ncols=1, sharex = True)
+        axs: Sequence[Axes] = fig.subplots(nrows=ROWS, ncols=1, sharex = True)
         
-        variance, ac1 = results
-        
-        i = 0
-        
-        def plot(data: Optional[Any], title: str):
+        def plot(data: pd.Series, title: str, i: int):
             axs[i].set_ylabel(title)
             axs[i].invert_xaxis()
             if i == 0:
                 axs[i].legend(dataset.feature_names())
-            if i == rows - 1:
+            if i == ROWS - 1:
                 axs[i].set_xlabel(f"Age ({dataset.age_format})")
             if data is not None:
                 names = dataset.feature_names()
                 for j, data in enumerate(data):
-                    axs[i].plot(data, label=names[j])
+                    axs[i].plot(data, data.index, label=names[j])
                     
-            
-        if self.variance:
-            plot(variance, "Variance")
-            i+=1
-        if self.ac1:
-            axs[i].invert_yaxis()
-            plot(ac1, "AC-1 (flipped)")
-            i+=1
+            plot(results["state"], "Data", 0)
+            plot(results["variance"], "Variance", 1)
+            plot(results["ac1"], "AC-1", 2)
+            plot(results["ktau_variance"], "KTau Variance", 3)
+            plot(results["ktau_ac1"], "KTau AC-1", 4)
             
         return fig

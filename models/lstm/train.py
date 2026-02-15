@@ -16,7 +16,10 @@ from typing import Final, Literal, Union
 import numpy as np
 import pandas as pd
 
-from training import TrainData, combine_batches
+from ..lstm import INDEX_COL, TrainData, combine_batches, compute_residuals
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 from keras.models import Sequential  # type: ignore
 from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input  # type: ignore
@@ -28,21 +31,18 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precisio
 
 def _read_batch(dir) -> tuple[TrainData, int]:
     print(f"Reading {dir}...")
-    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col="sequence_ID") 
+    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL) 
     
     if len(groups) == 0:
         raise RuntimeError("Empty labels file!")
 
-    simsresids = {seq_id:(
-        pd.read_csv(os.path.join(dir, f"output_sims/tseries{seq_id}.csv")), 
-        pd.read_csv(os.path.join(dir, f"output_resids/resids{seq_id}.csv")), 
-    ) for seq_id in groups.index.values}
+    sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv")) for seq_id in groups.index.values}
     
-    ts_len = len(next(iter(simsresids.values()))[0])
+    ts_len = len(next(iter(sims.values()))[0])
     
     print("Read", dir)
     
-    return (simsresids, pd.read_csv(os.path.join(dir, "labels.csv"), index_col="sequence_ID"), groups), ts_len
+    return (sims, pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL), groups), ts_len
 
 def _read_input_folder(input: str) -> tuple[TrainData, int]:
     try:
@@ -81,51 +81,38 @@ def train_lstm_from_batches(
     
     batches, ts_len = _read_input_folder(input)
                 
-    simsresids, df_targets, df_groups = batches
+    sims, df_targets, df_groups = batches
     
     print("Setting up training data...")
     
     match type:
         case "lrpad":
-            pad_left = 225 if ts_len == 500 else 725
-            pad_right = 225 if ts_len == 500 else 725
+            pad_left = (ts_len // 2) - 25
+            pad_right = pad_left
         case "lpad":
-            pad_left = 450 if ts_len == 500 else 1450
+            pad_left = ts_len - 50
             pad_right = 0
 
-    sequences: list[np.ndarray] = list()
-    for _, df in simsresids.values():
-        values = df[["Residuals"]].to_numpy(copy=True)
+    def transform(sim: pd.Series) -> np.ndarray:
+        values = compute_residuals(sim).to_numpy(copy=True)
         
         # Padding and normalizing input sequences
         values[:int(pad_left * random.uniform(0, 1))] = 0
-        values[:ts_len - int(pad_right * random.uniform(0, 1))] = 0
+        values[len(values)-int(pad_right * random.uniform(0, 1)):] = 0
         
-        total_sum = sum(abs(values))
-        count = np.count_nonzero(values)
-        values /= total_sum / count
+        avg = sum(np.abs(values)) / np.count_nonzero(values)
         
-        sequences.append(values)
-
-    sequences = np.array(sequences)
+        return values / avg
 
     # apply train/test/validation labels
     
-    labelled_seq = lambda label: np.array((
-        sequences[i]
-        for i, tsid in enumerate(simsresids.keys())
-        if df_groups["dataset_ID"].loc[tsid] == label
-    ))
+    labelled_seq = lambda label: np.array([transform(sims[tsid][1]) for tsid in df_groups[df_groups["dataset_ID"] == label].index])
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
     test = labelled_seq(3)
     
-    labelled_class_seq = lambda label: np.array((
-        df_targets["class_label"].loc[tsid]
-        for tsid in simsresids.keys()
-        if df_groups["dataset_ID"].loc[tsid] == label
-    ))
+    labelled_class_seq = lambda label: df_targets[df_groups["dataset_ID"] == label]["class_label"].to_numpy()
     
     train_target = labelled_class_seq(1)
     validation_target = labelled_class_seq(2)
@@ -134,7 +121,7 @@ def train_lstm_from_batches(
     print("Compiling model...")
     
     model = Sequential([
-        Input(shape=(train.shape[1], 1)),
+        Input(shape=(ts_len, 1)),
         Conv1D(
             filters=filters, 
             kernel_size=kernel_size,
@@ -180,6 +167,7 @@ def train_lstm_from_batches(
     
     print("Outputting model...")
     
+    os.makedirs(output, exist_ok=True)
     model.save(os.path.join(output, model_name))
     
     print("Testing model...")
@@ -229,7 +217,7 @@ def run_with_args():
                     description='Generates training data')
     parser.add_argument('input', type=str, help="Path to a folder containing batches or a generated batch")
     parser.add_argument('--output', '-o', type=str, help="Folder path to output models. If not provided, defaults to placing model beside training data.", default=None)
-    parser.add_argument('--name', '-n', type=int, help="Model name", default="best_model")
+    parser.add_argument('--name', '-n', type=str, help="Model name", default="best_model")
     parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for", default=500)
     parser.add_argument('--patience', '-p', type=int, help="Cancel training after a given number of epochs if the model does not improve since then", default=50)
     parser.add_argument('--type', '-t', type=str, help="Type of zero-padding to use training the model", default="lrpad")

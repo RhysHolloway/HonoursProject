@@ -1,18 +1,17 @@
 from typing import Final, Self, Sequence, Callable
-from models import Dataset, Model
+from models import Column, Dataset, Model
 
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
 from scipy.signal import find_peaks
-from keras.models import load_model, Sequential
-
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+from keras.models import load_model, Model
 
 class LSTMLoader:
     
@@ -24,7 +23,7 @@ class LSTMLoader:
         if not extension.startswith("."):
             extension = "." + extension
             
-        def load(dir: str) -> list[Sequential]:
+        def load(dir: str) -> list[Model]:
             dir = os.path.join(path, dir)
             if not os.path.exists(dir):
                 return []
@@ -46,144 +45,150 @@ class LSTMLoader:
         else:
             return self._1500models if len(series) > 500 else self._500models
 
-type LSTMResults = tuple[pd.DataFrame, pd.DataFrame, dict[str | None, dict[str, list[tuple]]]]
-class LSTM(Model[LSTMResults]):
+type LSTMPeaks = dict[Column, dict[str, Sequence[int]]]
+class LSTM(Model[pd.DataFrame]):
         
     def __init__(
         self: Self,
-        get_models: Callable[[pd.Series], list[Sequential]],
+        get_models: Callable[[pd.Series], Sequence[Model]],
         bandwidth: float = 0.2,
-        prominence: float = 0.05,
-        distance: int = 10,
         verbose: bool = True,
     ):
         super().__init__("CNN-LSTM")
         
         self.get_models = get_models
         self.bandwidth = bandwidth
-        self.prominence = prominence
-        self.distance = distance
         self.verbose = verbose
+        self.result_means: dict[Dataset, LSTMPeaks] = dict()
+        self.result_peaks: dict[Dataset, LSTMPeaks] = dict()
     
     COLUMNS: Final[list[str]] = ["Fold", "Hopf", "Branch", "Null"]
+    
+    
+    def run_on_series(
+        self: Self,
+        series: pd.Series,
+        spacing: int = 10
+    ):
+        list_df: list[pd.DataFrame] = []
+        series = pd.Series(series.to_numpy(), index=-series.index, name=series.name)[::-1]
+                             
+        model_list = self.get_models(series)
+        if len(model_list) == 0:
+            raise ValueError(f"No LSTM models were found to be used with {series.name}!")
+        
+        # Calculate residual (from ewstools)
+        # Standard deviation of kernel given bandwidth
+        # Note that for a Gaussian, quartiles are at +/- 0.675*sigma
+        bandwidth = self.bandwidth * len(series) if 0 < self.bandwidth <= 1 else self.bandwidth
+        series -= gaussian_filter(series.to_numpy(), sigma=(0.25 / 0.675) * bandwidth, mode="reflect")
+
+        for model in model_list:
+
+            tmax_dfs: list[pd.DataFrame] = []
+            for tmax in np.arange(spacing, len(series), spacing):
+                
+                input = series[series.index[:tmax]].to_numpy()
+                input = input / np.mean(np.abs(input))
+                
+                # Set time series to input shape either by truncation of the start of the series or by appending zeroes to the start
+                if len(input) > model.input_shape[1]:
+                    input = input[-model.input_shape[1]:]
+                else:
+                    input = np.concatenate((np.zeros(model.input_shape[1] - len(input)), input))
+
+                # Get DL prediction
+                df = pd.DataFrame(model.predict(input.reshape(1, model.input_shape[1], 1), verbose=self.verbose), columns=self.COLUMNS, index = [0])
+                df.insert(0, "time", -series.index[tmax])
+                tmax_dfs.append(df)
+                
+            df = pd.concat(tmax_dfs)
+            list_df.append(df)
+            
+        df = self.calc_means(pd.concat(list_df))
+        df.insert(0, "variable", series.name)
+        return df
+    
+    @staticmethod
+    def calc_means(predictions: pd.DataFrame) -> pd.DataFrame:
+        return predictions.groupby("time")[__class__.COLUMNS].mean()
+    
+    @staticmethod
+    def calc_peaks(
+        predictions: pd.DataFrame, 
+        means: pd.DataFrame | None = None, 
+        prominence: float = 0.05,
+        distance: int = 10,
+    ) -> LSTMPeaks:
+        
+        def subset(df: pd.DataFrame) -> dict[str, Sequence[int]]:
+            return {
+                name:find_peaks(
+                    x=col.index,
+                    height=col.to_numpy(),
+                    prominence=prominence,
+                    distance=distance
+                )[0] for name, col in df[__class__.COLUMNS[:-1]].items()
+            }
+        
+        peaks = {feature:subset(df.set_index("time")) for feature, df in predictions.groupby("variable")} 
+        if means:
+            peaks[None] = subset(means)
+        return peaks
+
+    def means(
+        self: Self,
+        dataset: Dataset
+    ) -> pd.DataFrame:
+        if dataset not in self.result_means:
+            self.result_means[dataset] = self.calc_means(self.results[dataset])
+        return self.result_means[dataset]
+
+    def peaks(
+        self: Self, 
+        dataset: Dataset, 
+        prominence: float = 0.05,
+        distance: int = 10,
+    ) -> LSTMPeaks:
+        if dataset not in self.result_peaks:
+            self.result_peaks[dataset] = self.calc_peaks(self.results[dataset], self.means(dataset), prominence, distance)
+        return self.result_peaks[dataset]
+        
 
     def run(
         self: Self,
         dataset: Dataset,
     ):
-               
-        ages = -dataset.ages()
-        list_df: list[pd.DataFrame] = []
-        for col, feature in dataset.features().items():
-            series = pd.Series(feature.to_numpy(), index=ages)[::-1]
-                             
-            classifier_list = self.get_models(series)        
-            if len(classifier_list) == 0:
-                raise ValueError(f"No LSTM models were found to be used with {dataset.name}!")
-            
-            # Calculate residual (from ewstools)
-            # Standard deviation of kernel given bandwidth
-            # Note that for a Gaussian, quartiles are at +/- 0.675*sigma
-            bandwidth = self.bandwidth * len(series) if 0 < self.bandwidth <= 1 else self.bandwidth
-            series -= gaussian_filter(series.to_numpy(), sigma=(0.25 / 0.675) * bandwidth, mode="reflect")
-
-            for i, classifier in enumerate(classifier_list):
-                            
-                # space predictions apart by 10 data points (inc must be defined in terms of time)
-                dt = series.index[1] - series.index[0]
-                inc = dt * 10
-                tmin = series.index[0]
-                tend = series.index[-1] # if not self.transition else self.transition
-                tend += dt  # Make transition point inclusive
-
-                model_name = f"len{classifier.input_shape[1]}-{i}"
-                
-                tmax_dfs: list[pd.DataFrame] = []
-                for tmax in np.arange(tmin + inc, tend + dt, inc):
-                    
-                    input_series: pd.Series = series[(series.index >= tmin) & (series.index < tmax)]
-                    input_series = input_series / (abs(input_series).mean())
-                    
-                    # BURY PAPER RESTRICTS TIME SERIES TO LAST 500/1500 STEPS BEFORE TRANSITION
-                    input_data: np.ndarray = (
-                        input_series.iloc[-classifier.input_shape[1]:].to_numpy() \
-                        if len(input_series) > classifier.input_shape[1] else \
-                            np.concatenate(
-                                (np.zeros(classifier.input_shape[1] - len(input_series)), input_series.to_numpy())
-                            )
-                        ).reshape(1, -1, 1)
-
-                    # Get DL prediction
-                    dl_pred: np.ndarray = classifier.predict(input_data, verbose=self.verbose)[0]
-                    # Put info into dataframe
-                    df = pd.DataFrame({self.COLUMNS[i]:v for i, v in enumerate(dl_pred)}, index = [0])
-                    df.insert(0, "Time", -input_series.last_valid_index())
-                    df["tmax"] = tmax
-                    tmax_dfs.append(df)
-                df = pd.concat(tmax_dfs)
-                df.insert(0, "Feature", dataset.feature_name(col))
-                df.insert(1, "Model", model_name)
-                df.insert(len(df.columns) - 1, "tmin", tmin)
-                list_df.append(df)
-                    
-        if len(list_df) == 0:
-            raise ValueError("Could not compute any predictions for", dataset.name)
-
-        dl_preds: pd.DataFrame = pd.concat(list_df)
-
-        # Get ensemble dl prediction (if multiple features)
-        dl_preds_mean = dl_preds.groupby("Time")[self.COLUMNS].mean()
-        dl_preds_mean.index.name = "Time"
         
-        def peaks(df: pd.DataFrame) -> dict[str, list[tuple]]:
-            
-            def find_peaks_in_col(col: pd.Series):
-
-                # Find and filter by prominence
-                ages = col.index
-                height = col.to_numpy()
-                peak_indices, _ = find_peaks(
-                    ages,
-                    height=height,
-                    prominence=self.prominence,
-                    distance=self.distance
-                )
-                
-                return list(zip(ages[peak_indices], height[peak_indices]))
-            
-            return {
-                name:find_peaks_in_col(col)
-                for name, col in df[self.COLUMNS[:-1]].items()
-            }
-            
-        dl_peaks = {feature:peaks(dl_preds[dl_preds["Feature"] == feature].set_index("Time")) for feature in dataset.feature_names()} | {None:peaks(dl_preds_mean)}
-        
-        self.results[dataset] = (dl_preds, dl_preds_mean, dl_peaks)
+        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[feature]).reset_index() for feature in dataset.feature_cols.keys()))
 
     def _print(self: Self, dataset: Dataset):
-        _, _, points = self.results[dataset]
-        for feature, points in points.items():
-            detected = sum(len(p) for p in points.values())
+        preds = self.results[dataset]
+        peaks = self.peaks(dataset)
+        for col, col_indices in peaks.items():
+            df = preds[preds["variable"] == col]
+            detected = sum(len(p) for p in col_indices.values())
             if detected != 0:
-                print(f"Detected {detected} peaks for {"feature " + feature if feature is not None else "combined data"}:")
-                for type, points in points.items():
-                    for point in points:
-                        print(f"{point[1]} ({type}) at {point[0]} {dataset.age_format}")
+                print(f"Detected {detected} peaks for {"variable " + col if col is not None else "combined data"}:")
+                for type, indices in col_indices.items():
+                    for idx in indices:
+                        print(f"{df[type].iloc[idx]} ({type}) at {df[type].index[idx]} {dataset.age_format}")
         
     def _plot(self: Self, dataset: Dataset) -> Figure:
                 
         fig = plt.figure(figsize=(9, 12))
         fig.suptitle(f"Bifurcation classifications on {dataset.name}")
         
-        preds, means, peaks = self.results[dataset]
+        preds = self.results[dataset]
         
-        def plot_peak(ax: Axes, feature: None | str, col: str):
-            points = peaks[feature][col]
-            if len(points) != 0: 
-                x, y = zip(*points)
-                ax.scatter(x, y)
+        means = self.means(preds)
+        peaks = self.peaks(preds, means)
         
-        subplots: Sequence[Axes] = fig.subplots(nrows=len(self.COLUMNS), ncols=1, sharex='all',)
+        def plot_peak(ax: Axes, df: pd.DataFrame, col: str):
+            indices = peaks[feature][col]
+            ax.scatter(df.index[indices], df.iloc[indices])
+        
+        subplots: Sequence[Axes] = fig.subplots(nrows=len(self.COLUMNS), ncols=1, sharex='all')
         
         mean_ax = subplots[-1]
         mean_ax.invert_xaxis()
@@ -193,13 +198,13 @@ class LSTM(Model[LSTMResults]):
         for i, col in enumerate(self.COLUMNS[:-1]): # All besides null column, which
             ax = subplots[i]
             ax.set_ylabel(col + " Probability")
-            for feature in dataset.feature_names():
-                feature_preds = preds[preds["Feature"] == feature].set_index("Time")[col]
-                ax.plot(feature_preds)
-                plot_peak(ax, feature, col)
+            for feature, data in dataset.features().groupby("variable"):
+                data = data.set_index("time")[col]
+                ax.plot(data.index, data)
+                plot_peak(ax, data, col)
             
             mean_ax.plot(means[col], label=col)
-            plot_peak(ax, None, col)
+            plot_peak(ax, means, col)
             
         fig.legend(dataset.feature_names())
         
@@ -234,10 +239,9 @@ INDEX_COL: Final[str] = 'sequence_ID'
 LABEL_COLS: Final[list[str]] = [INDEX_COL, 'class_label', 'bif', 'null']
 
 type Sims = pd.Series
-type Resids = pd.Series
 type Labels = pd.DataFrame
 type Groups = pd.DataFrame
-type TrainData = tuple[dict[int, tuple[Sims, Resids]], Labels, Groups]
+type TrainData = tuple[dict[int, Sims], Labels, Groups]
 
 # Returns combined (indexed sims + resids, labels, groups)
 def combine_batches(batches: Iterable[TrainData]) -> TrainData:
@@ -255,12 +259,11 @@ def combine_batches(batches: Iterable[TrainData]) -> TrainData:
     
     return reduce(_reduce_combine, batches)
 
-
 def compute_residuals(data: pd.Series) -> pd.Series:
         smooth_data = lowess(data.values, data.index.values, frac=0.2)[:, 1]
         return pd.Series(data.values - smooth_data, index=data.index, name="Residuals")
     
-type XY = np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]
+type XY = np.ndarray[np.dtype[float]]
 type DeFunc = Callable[[XY, float], XY]
 
 class StochSim():
@@ -270,7 +273,7 @@ class StochSim():
         binit: float,
         bcrit: float,
         ts_len: int,
-        dt: np.float64 = 0.01,
+        dt: float = 0.01,
         dt_sample: float = 1.0,
         t0: int = 0,
     ):
@@ -292,7 +295,7 @@ class StochSim():
                 bifurcation from initial point (0 is initial point, 1 is bifurcation point)
         :type null_location: Union[float, None]
         :param dt: Description
-        :type dt: np.float64
+        :type dt: float
         :param dt_sample: Indices between sampled points
         :type dt_sample: int
         :param t0: Start time in time series
@@ -318,7 +321,7 @@ class StochSim():
         self: Self,
         de_fun: DeFunc,
         s0: XY,
-        sigma: float | XY, 
+        sigma: float, 
         tburn: int = 100, # burn-in period
         clip: Callable[[XY], XY] = lambda s: s,
         rand: np.random.RandomState = np.random.mtrand._rand,
@@ -333,7 +336,7 @@ class StochSim():
         :param s0: Initial value
         :type s0: XY
         :param sigma: amplitude factor of GWN - total amplitude also depends on parameter values
-        :type sigma: float | XY
+        :type sigma: float
         :param tburn: Burn-in length
         :type tburn: int
         :param clip: Optional clipping function for simulation
@@ -343,11 +346,11 @@ class StochSim():
         """
         
         ## Implement Euler Maryuyama for stocahstic simulation
-        s: np.ndarray[np.ndarray[np.float64]] = np.zeros([len(self.parameter),2])
+        s: np.ndarray[np.ndarray[float]] = np.zeros([len(self.parameter),len(s0)])
         
         # Create brownian increments (s.d. sqrt(dt))
-        dW_burn = rand.normal(loc=0, scale=sigma*np.sqrt(self.dt), size = [int(tburn/self.dt),2])
-        dW = rand.normal(loc=0, scale=sigma*np.sqrt(self.dt), size = [len(self.parameter/self.dt),2])
+        dW_burn = rand.normal(loc=0, scale=np.sqrt(self.dt) * sigma, size = [int(tburn/self.dt),len(s0)])
+        dW = rand.normal(loc=0, scale=np.sqrt(self.dt) * sigma, size = [len(self.parameter/self.dt),len(s0)])
         
         # Run burn-in period on s0
         for i in range(int(tburn/self.dt)):
@@ -362,10 +365,10 @@ class StochSim():
             s[i+1] = clip(s[i] + de_fun(s[i], self.parameter.iloc[i])*self.dt + dW[i])
                 
         # Store series data in a DataFrame
-        df_traj = pd.DataFrame({"Time": self.parameter.index} | {f"p{i}":s[:,i] for i in range(s.shape[1])})#, 'b': self.parameter.to_numpy()})
+        df_traj = pd.DataFrame({"time": self.parameter.index} | {f"p{i}":s[:,i] for i in range(s.shape[1])})#, 'b': self.parameter.to_numpy()})
         
         # Filter dataframe according to spacing
-        df_traj_filt = df_traj.iloc[0::int(self.dt_sample/self.dt)]
-        df_traj_filt["Time"] = df_traj_filt["Time"].astype(int)
+        df_traj_filt = df_traj.iloc[0::int(self.dt_sample/self.dt)].set_index("time")
+        df_traj_filt.index = df_traj_filt.index.astype(int)
 
         return df_traj_filt

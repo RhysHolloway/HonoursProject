@@ -1,8 +1,13 @@
 from typing import Any, Callable, Iterable, Sequence
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 from scipy import stats
 from sklearn import metrics
+import matplotlib.pyplot as plt
+
+from models.metrics import Metrics
 
 from ..lstm import LSTMLoader, Dataset, LSTM, StochSim, XY, DeFunc
 
@@ -14,8 +19,9 @@ def simulate(
     ts_len: int,
     init: XY,
     sigma: XY | float,
-    sims: int
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    sims: int,
+    name: str = ""
+) -> tuple[list[Dataset], Any]:
     assert sims > 0
     
     model = StochSim(
@@ -24,78 +30,27 @@ def simulate(
         ts_len=ts_len,
     )
     
-    def sim_tsid(tsid: int) -> pd.DataFrame:
+    def sim_tsid(tsid: int) -> pd.Series:
         df: pd.DataFrame = model.simulate(
             de_fun=de_fun,
             s0=init,
             sigma=sigma,
             clip=lambda xy: np.clip(xy, a_min=0, a_max=None)
         )
-        df.insert(0, "tsid", tsid)
-        return df
+        
+        # Use only x ()
+        df = df[["p0"]]
+        
+        return Dataset(
+            name=f"{name}{"_" if len(name) != 0 else ""}{tsid}_len{ts_len}",
+            df=df,
+            feature_cols=Dataset._convert_feature_cols(df.columns),
+            age_format="",
+        )
     
-    
-    df_traj_filt: pd.DataFrame = pd.concat(map(sim_tsid, range(1, sims + 1)), ignore_index=True)
-    
-    import ewstools
-    rw = 0.25  # rolling window
-    span = 0.2  # span for Lowess smoothing
-    
-    def ews(tcrit: pd.Series | None) -> pd.DataFrame:
-    
-        list_df: list[pd.DataFrame] = []
+    return (list(map(sim_tsid, range(1, sims + 1))), model.parameter[model.parameter > bcrit].index[1]) 
 
-        # loop through realisation number
-        for tsid, df_traj in df_traj_filt.groupby(by="tsid"):
-            for var, series in df_traj.set_index("Time").drop(columns=["tsid"]).items():
-                ts = ewstools.TimeSeries(series, transition=tcrit)
-                ts.detrend(method="Lowess", span=span)
-                ts.compute_var(rolling_window=rw)
-                ts.compute_auto(rolling_window=rw, lag=1)
-                df_ews_temp = ts.state.join(ts.ews).reset_index()
-
-                # Include a column in the DataFrames for realisation number and variable
-                df_ews_temp.insert(0, "tsid", tsid)
-                df_ews_temp.insert(1, "Variable", var)
-
-                # Add DataFrames to list
-                list_df.append(df_ews_temp)
-        return pd.concat(list_df, ignore_index=True)    
-    
-    df_ews_forced = ews(None)
-    df_ews_null = ews(model.parameter[model.parameter > bcrit].index[1])
-            
-    # Concatenate EWS DataFrames. Index [tsid, Variable, Time]
-    return (df_ews_forced, df_ews_null) 
-
-# Compute kendall tau values at equally spaced time points
-def _ktau_series(series: pd.Series, t_res: Callable[[int], int], name: str) -> pd.Series:
-    
-    # Function to compute kendall tau for time seires data up to point t_fin
-    def _ktau_compute(series: pd.Series):
-        return stats.kendalltau(series.index.to_numpy(), series.to_numpy())[0]
-    
-    tVals = series.index[::t_res(len(series))]
-    start = series[pd.notna(series)].index[1] # Get first non-NaN index in series
-    # Return series
-    return pd.Series((_ktau_compute(series.loc[start:t_end]) for t_end in tVals), index=tVals, name=name)
-
-def ktau(df: pd.DataFrame, t_res: Callable[[int], int] = lambda ts_len: int(ts_len / 150)):
-
-    def compute(tup: tuple[Any, pd.DataFrame]):
-        (tsid, variable), df_tsid = tup
-        df = pd.concat(
-            (_ktau_series(df_tsid.set_index("Time")[col], t_res, name) for col, name in (("variance", "ktau_variance"), ("ac1", "ktau_ac"))),
-            axis=1
-        ).reset_index()
-        df.insert(0, "tsid", tsid)
-        df.insert(1, "Variable", variable)
-        return df
-
-    # Concatenate kendall tau dataframes
-    return pd.concat(map(compute, df.groupby(["tsid", "Variable"])))
-
-def may_fold(ts_len: int, sims: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+def may_fold(ts_len: int, sims: int = 10):
     
     r = 1  # growth rate
     k = 1  # carrying capacity
@@ -111,7 +66,7 @@ def may_fold(ts_len: int, sims: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
             r * x * (1 - x / k) - a * (x**2 / (s**2 + x**2))
         ])
 
-    return simulate(        
+    return simulate(
         de_fun=de_fun,
         bl=bl,
         bh=bh,
@@ -122,12 +77,9 @@ def may_fold(ts_len: int, sims: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
         sims=sims,
     )
     
-def cr_trans(ts_len: int, sf: int = 4, sims: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+def cr_trans(ts_len: int, sf: int = 4, sims: int = 10):
         
     # Model parameters
-    # sf = 4  # scale factor
-    sigma_x = 0.01  # noise intensity
-    sigma_y = 0.01
     r = 1 * sf
     k = 1.7
     h = 0.6 / sf
@@ -152,12 +104,12 @@ def cr_trans(ts_len: int, sf: int = 4, sims: int = 10) -> tuple[pd.DataFrame, pd
         bh=ah,
         bcrit=abif,
         init=[x0, y0],
-        sigma=[sigma_x, sigma_y],
+        sigma=0.01,
         ts_len=ts_len,
         sims=sims,
     )
     
-def cr_hopf(ts_len: int, sf: int = 4, sims: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+def cr_hopf(ts_len: int, sf: int = 4, sims: int = 10):
 
     # Model parameters
     # sf = 4  # scale factor
@@ -187,30 +139,35 @@ def cr_hopf(ts_len: int, sf: int = 4, sims: int = 10) -> tuple[pd.DataFrame, pd.
         bh=ah,
         bcrit=abif,
         init=[x0, y0],
-        sigma=[sigma_x, sigma_y],
+        sigma=np.array([sigma_x, sigma_y]),
         ts_len=ts_len,
         sims=sims,
     )
 
-
-import plotly.graph_objects as go
-
-def plot_simulation(
+def compute_roc(
     df_ews_forced: pd.DataFrame, 
-    df_ews_null: pd.DataFrame, 
-    df_ktau_forced: pd.DataFrame, 
-    df_ktau_null: pd.DataFrame,
-    df_ml_forced: pd.DataFrame, 
-    df_ml_null: pd.DataFrame,
+    df_ews_null: pd.DataFrame,
     bool_pred_early: bool = True
-) -> tuple[go.Figure, pd.DataFrame, pd.DataFrame]:
+) -> tuple[Figure, pd.DataFrame, pd.DataFrame]:
     
     # --------
     # Import EWS and ML data
-    # –------------
+    # –------------)
 
     # # Import EWS data
     # Use EWS data in x
+    
+    def ktau_df(df: pd.DataFrame):
+        return df[["tsid", "time", "ktau_variance", "ktau_ac1"]].dropna()
+    
+    def ml_df(df: pd.DataFrame):
+        return df[["tsid", "time"] + LSTM.COLUMNS].dropna()
+    
+    df_ktau_forced = ktau_df(df_ews_forced)
+    df_ktau_null = ktau_df(df_ews_null)
+        
+    df_ml_forced = ml_df(df_ews_forced)
+    df_ml_null = ml_df(df_ews_null)
 
     # Add column for truth values (1 for forced, 0 for null)
     df_ktau_forced["truth value"] = 1
@@ -242,9 +199,9 @@ def plot_simulation(
 
         # Get EWS data to find start and transition time
         df: pd.DataFrame = df_ews_forced[(df_ews_forced["tsid"] == tsid)]
-        t_start = df["Time"].iloc[0]
+        t_start = df["time"].iloc[0]
         t_transition = (
-            df[["Time", "residuals"]].dropna()["Time"].iloc[-1]
+            df[["time", "residuals"]].dropna()["time"].iloc[-1]
         )  # where the residuals end
 
         # Get prediction interval in time
@@ -255,13 +212,13 @@ def plot_simulation(
         # Get data within prediction interval
         df_ktau_forced_final = df_ktau_forced[
             (df_ktau_forced["tsid"] == tsid)
-            & (df_ktau_forced["Time"] >= t_pred_start)
-            & (df_ktau_forced["Time"] <= t_pred_end)
+            & (df_ktau_forced["time"] >= t_pred_start)
+            & (df_ktau_forced["time"] <= t_pred_end)
         ]
         df_ml_forced_final = df_ml_forced[
             (df_ml_forced["tsid"] == tsid)
-            & (df_ml_forced["Time"] >= t_pred_start)
-            & (df_ml_forced["Time"] <= t_pred_end)
+            & (df_ml_forced["time"] >= t_pred_start)
+            & (df_ml_forced["time"] <= t_pred_end)
         ]
 
         # Extract 10 evenly spaced predictions across the prediciton time interval
@@ -288,9 +245,9 @@ def plot_simulation(
 
         # Get EWS data to find start and transition time (for forced data)
         df = df_ews_forced[(df_ews_forced["tsid"] == tsid)]
-        t_start = df["Time"].iloc[0]
+        t_start = df["time"].iloc[0]
         t_transition = (
-            df[["Time", "residuals"]].dropna()["Time"].iloc[-1]
+            df[["time", "residuals"]].dropna()["time"].iloc[-1]
         )  # where the residuals end
 
         # Get prediction interval in time
@@ -301,13 +258,13 @@ def plot_simulation(
         # Get data within prediction interval
         df_ktau_null_final = df_ktau_null[
             (df_ktau_null["tsid"] == tsid)
-            & (df_ktau_null["Time"] >= t_pred_start)
-            & (df_ktau_null["Time"] <= t_pred_end)
+            & (df_ktau_null["time"] >= t_pred_start)
+            & (df_ktau_null["time"] <= t_pred_end)
         ]
         df_ml_null_final = df_ml_null[
             (df_ml_null["tsid"] == tsid)
-            & (df_ml_null["Time"] >= t_pred_start)
-            & (df_ml_null["Time"] <= t_pred_end)
+            & (df_ml_null["time"] >= t_pred_start)
+            & (df_ml_null["time"] <= t_pred_end)
         ]
 
         # Extract 10 evenly spaced predictions across the prediciton time interval
@@ -342,19 +299,18 @@ def plot_simulation(
     # Count each bifurcation choice for forced trajectories
     counts = df_ml_preds[df_ml_preds["truth value"] == 1]["fav_bif"].value_counts()
 
-    df_counts = pd.DataFrame({col.lower():counts[col] if col in counts.index else 0 for col in LSTM.COLUMNS})
+    df_counts = pd.DataFrame({col.lower():[counts.get(col, 0)] for col in LSTM.COLUMNS})
 
     # --------------------
     # Functions to compute ROC
     # –--------------------
 
-
     # Function to compute ROC data from truth and indicator vals
     # and return a df.
-    def roc_compute(truth_vals, indicator_vals):
+    def roc_compute(df: pd.DataFrame, indicator: str):
 
         # Compute ROC curve and threhsolds using sklearn
-        fpr, tpr, thresholds = metrics.roc_curve(truth_vals, indicator_vals)
+        fpr, tpr, thresholds = metrics.roc_curve(df["truth value"], df[indicator])
 
         return pd.DataFrame({
             "fpr": fpr, 
@@ -367,172 +323,113 @@ def plot_simulation(
     # ---------------------
     ## Compute ROC data
     # –--------------------
+    
+    return {
+        "ML": roc_compute(df_ml_preds, "bif_prob"),
+        "Variance": roc_compute(df_ktau_preds, "ktau_variance"),
+        "Lag-1 AC": roc_compute(df_ktau_preds, "ktau_ac1"),
+    }, df_counts
+    
+def plot_roc(rocs: dict[str, pd.DataFrame], name: str, ts_len: int):
 
-    # Initialise list for ROC dataframes for predicting May fold bifurcation
-    list_roc = []
-
-
-    # Assign indicator and truth values for ML prediction
-    indicator_vals = df_ml_preds["bif_prob"]
-    truth_vals = df_ml_preds["truth value"]
-    df_roc = roc_compute(truth_vals, indicator_vals)
-    df_roc["ews"] = "ML bif"
-    list_roc.append(df_roc)
-
-
-    # Assign indicator and truth values for variance
-    indicator_vals = df_ktau_preds["ktau_variance"]
-    truth_vals = df_ktau_preds["truth value"]
-    df_roc = roc_compute(truth_vals, indicator_vals)
-    df_roc["ews"] = "Variance"
-    list_roc.append(df_roc)
-
-
-    # Assign indicator and truth values for lag-1 AC
-    indicator_vals = df_ktau_preds["ktau_ac"]
-    truth_vals = df_ktau_preds["truth value"]
-    df_roc = roc_compute(truth_vals, indicator_vals)
-    df_roc["ews"] = "Lag-1 AC"
-    list_roc.append(df_roc)
-
-
-    # Concatenate roc dataframes
-    df_roc_full = pd.concat(list_roc, ignore_index=True)
-
-
-    # -------------
-    # Plotly fig
-    # ----------------
-
-    fig = go.Figure()
-    df_roc = df_roc_full
-
-    # ML bif plot
-    df_trace = df_roc[df_roc["ews"] == "ML bif"]
-    fig.add_trace(
-        go.Scatter(
-            x=df_trace["fpr"],
-            y=df_trace["tpr"],
-            mode="lines",
-            name="ML bif (AUC={})".format(df_trace.round(2)["auc"].iloc[0]),
+    fig = plt.figure()
+    axes: Axes = fig.subplots()
+        
+    for roc_name, df_roc in rocs.items():
+        axes.plot(
+            df_roc["fpr"],
+            df_roc["tpr"],
+            label=f"{roc_name} bif (AUC={np.round(df_roc["auc"].iloc[0], 2)})"
         )
-    )
-
-    # Variance plot
-    df_trace = df_roc[df_roc["ews"] == "Variance"]
-    fig.add_trace(
-        go.Scatter(
-            x=df_trace["fpr"],
-            y=df_trace["tpr"],
-            name="Variance (AUC={})".format(df_trace.round(2)["auc"].iloc[0]),
-        )
-    )
-
-    # Lag-1  AC plot
-    df_trace = df_roc[df_roc["ews"] == "Lag-1 AC"]
-    fig.add_trace(
-        go.Scatter(
-            x=df_trace["fpr"],
-            y=df_trace["tpr"],
-            name="Lag-1 AC (AUC={})".format(df_trace.round(2)["auc"].iloc[0]),
-        )
-    )
 
     # Line y=x
-    fig.add_trace(
-        go.Scatter(
-            x=np.linspace(0, 1, 100),
-            y=np.linspace(0, 1, 100),
-            showlegend=False,
-            line={"color": "black", "dash": "dash"},
-        )
+    axes.plot(
+        np.linspace(0, 1, 100),
+        np.linspace(0, 1, 100),
+        color="black", 
+        linestyle="dashed",
     )
 
-    fig.update_xaxes(
-        title="False positive rate",
-        range=[-0.01, 1],
-    )
-    fig.update_yaxes(
-        title="True positive rate",
-    )
+    axes.set_xlabel("False positive rate")
+    axes.set_xbound(-0.01, 1)
+    axes.set_ylabel("True positive rate")
 
-    fig.update_layout(
-        legend=dict(
-            x=0.6,
-            y=0,
-        ),
-        width=600,
-        height=600,
-        title="ROC for CR Hopf model",
-    )
+    fig.legend()
+    fig.suptitle(f"ROC {name} len{ts_len}")
     
-    return fig, df_counts, df_roc_full
-    
-def simulate_ml(lstm: LSTM, df: pd.DataFrame) -> pd.DataFrame:
-    
-    sims = {name:Dataset(
-        name=f"ts{name[0]}-{name[1]}",
-        df=uniq_df.set_index("Time").dropna(),
-        feature_cols={"residuals":"Residuals"},
-        age_format="",
-    ) for name, uniq_df in df.groupby(["tsid", "Variable"])}
-    
-    for dataset in sims.values():
-        lstm.run(dataset)
-    
-    list_df: list[pd.DataFrame] = []
-    for (tsid, var), dataset in sims.items():
-        df = lstm.results[dataset][1].reset_index()
-        # Add info to dataframe
-        df.insert(0, "tsid", tsid)
-        df.insert(1, "Variable", var)
-        
-        list_df.append(df)
-        
-    return pd.concat(list_df).sort_values(
-        ["Variable", "tsid", "Time"], na_position="first"
-    )
+    return fig
 
-type _Models = Iterable[tuple[str, int, tuple[pd.DataFrame, pd.DataFrame]]]
-def test_models():
+type _Models = Iterable[tuple[str, int, tuple[list[Dataset], Any]]]
+
+def generate_test_models():
     for ts_len in (500, 1500):
         for test in (may_fold, cr_hopf, cr_trans):
             print("Simulating", test.__name__, "for length", ts_len)
-            # Use only x (p0)
-            df_ews_forced, df_ews_null = tuple(df[df["Variable"] == df["Variable"].iloc[0]] for df in test(ts_len=ts_len))
-            yield test.__name__, ts_len, (df_ews_forced, df_ews_null)
-
-# def from_datasets(datasets: Sequence[Dataset]) -> _Models:
+            datasets, tcrit = test(ts_len=ts_len)
+            yield test.__name__, datasets, tcrit
     
-#     def single(dataset: Dataset):
-#         return dataset.df.rename({"Feature":"Variable", "Model":"tsid"}).reset_index()
+def generate_metrics(lstm: LSTM, models: list[Dataset], tcrit: Any) -> tuple[int, pd.DataFrame, pd.DataFrame]:
+    
+    list_df_forced: list[pd.DataFrame] = []
+    list_df_null: list[pd.DataFrame] = []
+    
+    metrics = Metrics(window=0.25, ktau_distance=5)
         
-#     return (single(dataset) for dataset in datasets)
+    def run_metrics(tsid: int, tcrit) -> pd.DataFrame: 
+        list_df: list[pd.DataFrame] = []
+        for var in dataset.feature_cols.keys():
+            df = metrics.run_on_series(dataset.df[var], transition=tcrit)
+            df = df.join(lstm.calc_means(lstm.run_on_series(df["residuals"])))
+            df.insert(0, "tsid", tsid + 1)
+            list_df.append(df.reset_index())
+        return pd.concat(list_df)
+        
+    ts_len = None
+    for tsid, dataset in enumerate(models):
+        
+        if ts_len is None:
+            ts_len = len(dataset.df)
+        else:
+            assert ts_len == len(dataset.df)
+        
+        list_df_forced.append(run_metrics(tsid, None))
+        list_df_null.append(run_metrics(tsid, tcrit))
     
-def test(lstm: LSTM, output: str | None = None, models: _Models = test_models()):
-    for name, ts_len, ews in models: 
-        print("Computing ktau...")
-        ktaus = [ktau(df) for df in ews]
-        print("Running deep learning model on simulations...")
-        mls = [simulate_ml(lstm, df) for df in ews]
-        fig, _, _ = plot_simulation(
-            ews[0],
-            ews[1],
-            ktaus[0],
-            ktaus[1],
-            mls[0],
-            mls[1]
-        )
-        if output:
-            fig.write_image(os.path.join(output, f"ROC {name} len{ts_len}.png"))
+    return ts_len, pd.concat(list_df_forced), pd.concat(list_df_null)
+
+def test(lstm: LSTM, models: Iterable[tuple[str, list[Dataset], Any]], output: str | None = None):
+    
+    for name, datasets, tcrit in models:
+        ts_len, forced, null = generate_metrics(lstm, datasets, tcrit)
+        
+        for variable in null["variable"].unique():
+            for type in ["early", "late"]:
+                
+                df_forced = forced[forced["variable"] == variable]
+                df_null = null[null["variable"] == variable]
+            
+                rocs, _ = compute_roc(
+                    df_forced,
+                    df_null,
+                    bool_pred_early= type == "early",
+                )
+                
+                fig = plot_roc(
+                    rocs,
+                    name + " " + variable + " " + type,
+                    ts_len
+                )
+                
+                if output:
+                    fig.savefig(os.path.join(output, fig.get_suptitle() + ".png"))
         
         
 if __name__ == "__main__":
     import argparse
     import os
     parser = argparse.ArgumentParser(
-                    prog='LSTM Training Data Generator',
-                    description='Generates training data')
+                    prog='LSTM Model Tester',
+                    description='Tests trained models against simulated data')
     parser.add_argument('modelpath', type=str)
     parser.add_argument('output', type=str)
     parser.add_argument('--extension', '-e', type=str)
@@ -540,7 +437,7 @@ if __name__ == "__main__":
     
     lstm = LSTMLoader(args.modelpath, extension=args.extension).with_args(verbose=False)
     
-    test(lstm, output=args.output)
+    test(lstm, models=generate_test_models(), output=args.output)
     
 
         

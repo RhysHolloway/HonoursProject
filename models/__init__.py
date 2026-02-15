@@ -1,5 +1,5 @@
 import traceback
-from typing import Callable, Generic, Iterable, Self, Sequence, TypeVar
+from typing import Any, Callable, Generic, Iterable, Self, Sequence, TypeVar
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
@@ -35,7 +35,7 @@ class Dataset:
         age_col: Column,
         feature_cols: FeatureColumns,
         age_scale: int = 1,
-    ) -> Self:
+    ):
         assert len(feature_cols) != 0
         
         feature_cols = __class__._convert_feature_cols(feature_cols)
@@ -78,6 +78,29 @@ class Dataset:
                 age_format=self.age_format
             ) for feat_name, columns in features.items()
         ]
+        
+    def normalize(self: Self):
+        df = self.df.copy()
+        
+        for col in self.features_cols.keys():
+            arr: np.ndarray = df[col].to_numpy()
+            div = np.mean(np.abs(arr))
+            df[col] = arr / div
+        
+        return self.__class__(
+            name=self.name,
+            df=df,
+            feature_cols = self.feature_cols.copy(),
+            age_format = self.age_format,
+        )
+        
+    def null(self: Self, index: Any):
+        return self.__class__(
+            name=self.name,
+            df=self.df[self.df.index < index],
+            feature_cols=self.feature_cols,
+            age_format=self.age_format,
+        )
            
     # Clean up data frame before transforming
     @staticmethod

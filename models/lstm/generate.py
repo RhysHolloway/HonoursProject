@@ -22,9 +22,11 @@ from typing import Any, Callable, Final, Self, Sequence, Union
 import pandas as pd
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
-from concurrent.futures import Executor, Future
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 import scipy.optimize._nonlin as nl
+import scipy.integrate
 import pycont
+import warnings
 
 from ..lstm import *
 
@@ -88,38 +90,29 @@ def _generate_simulation(
             
             return dydt
         
-        def solve_old():
-            import scipy.integrate
-            import warnings
-            with warnings.catch_warnings(action="ignore", category=scipy.integrate.ODEintWarning):
-                warnings.filterwarnings("ignore")
-                s = scipy.integrate.odeint(f, s0, t,
-                                        full_output=False,
-                                        hmin=1e-14,
-                                        mxhnil=0, printmessg=False, tfirst=True)
-            
-            # Put into pandas
-            df_traj = pd.DataFrame(s, index=t, columns=['x','y'])
-            
-            # Does the sysetm blow up?
-            # Does the system contain Nan?
-            # Does the system contain inf?
-            if df_traj.abs().max().max() > 1e3 or df_traj.isna().values.any() or np.isinf(df_traj.values).any():
-                return None
-            
-            # Does the system converge?
-            # Difference between max and min of last 10 data points
-            diff = df_traj.iloc[-10:-1].max() - df_traj.iloc[-10:-1].min()
-            # L2 norm
-            norm = np.sqrt(np.square(diff).sum())
-            if norm > conv_thresh:
-                return None
-            
-            return s
+        points = scipy.integrate.odeint(f, s0, t,
+                                full_output=False,
+                                hmin=1e-14,
+                                mxhnil=0, printmessg=False, tfirst=True)
         
-        points = solve_old()
-        if points is not None:
-            break
+        # Put into pandas
+        df_traj = pd.DataFrame(points, index=t, columns=['x','y'])
+        
+        # Does the sysetm blow up?
+        # Does the system contain Nan?
+        # Does the system contain inf?
+        if df_traj.abs().max().max() > 1e3 or df_traj.isna().values.any() or np.isinf(df_traj.values).any():
+            continue
+        
+        # Does the system converge?
+        # Difference between max and min of last 10 data points
+        diff = df_traj.iloc[-10:-1].max() - df_traj.iloc[-10:-1].min()
+        # L2 norm
+        norm = np.sqrt(np.square(diff).sum())
+        if norm > conv_thresh:
+            continue
+        
+        break
     
     # If made it this far, system is good for bifurcation continuation
     # print('System converges - export equilibria and parameter values\n')
@@ -243,7 +236,7 @@ SOLVER_PARAMETERS: Final[dict] = {
     "param_max": 5.0,
 }
 
-type _Simulation = tuple[Sims, Resids, BifType]
+type _Simulation = tuple[Sims, BifType]
 type _Simulations = dict[int, _Simulation]
 
 type _ModelOutput = list[_Simulation]
@@ -251,45 +244,38 @@ def _gen_model(
         ts_len: int,
         bif_max: int,
         total_counts: _AtomicCounts,
-        pool: Union[Executor, None] = None,
+        pool: Executor,
         simulations: _ModelOutput = [],
 ) -> _ModelOutput:
     
     model_counts = _AtomicCounts()
     
     # Multithread the parameter simuations
-    def pool_funcs():
-        tasks = [pool.submit(_simulate, par, pars, equi, rrate, ts_len, bif_max, total_counts, model_counts) for par in range(len(pars)) if pars[par] != 0.0]
-                
-        def cancel():
-            for task in tasks:
-                task.cancel()
-        
-        def generator():
-            for task in concurrent.futures.as_completed(tasks):
-                e = task.exception()
-                yield e if e is not None else task.result()
-                
-        return generator, cancel
-        
-    # Run parameter simulations on a single thread
-    def none_funcs():
-        def generator():
-            for par in range(len(pars)):
-                if pars[par] != 0.0:
-                    try:
-                        yield _simulate(par, pars, equi, rrate, ts_len, bif_max, total_counts, model_counts)
-                    except Exception as e:
-                        yield e
-        def cancel():
-            pass
-        return generator, cancel
+    tasks = [
+        pool.submit(
+            _simulate, 
+            par, 
+            pars, 
+            equi, 
+            rrate, 
+            ts_len, 
+            bif_max, 
+            total_counts, 
+            model_counts
+        ) for par in range(len(pars)) if pars[par] != 0.0
+    ]
     
-    pars, equi, rrate = _generate_simulation()
-        
-    generator, cancel = none_funcs() if pool is None else pool_funcs()
+    with warnings.catch_warnings(action="ignore", category=scipy.integrate.ODEintWarning):
+        pars, equi, rrate = _generate_simulation()
 
-    for r in generator():
+    def retry():
+        for task in tasks:
+            task.cancel()
+        return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations) 
+
+    for task in concurrent.futures.as_completed(tasks):
+        e = task.exception()
+        r = e if e is not None else task.result()
         match r:
             case list(new_sims):
                 simulations += new_sims
@@ -297,17 +283,16 @@ def _gen_model(
                 match type(r):
                     case builtins.ValueError:
                         if "Jacobian inversion yielded zero vector." in str(r):
-                            cancel()
-                            return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations) 
+                            return retry()
                     case nl.NoConvergence | builtins.RecursionError:
-                        cancel()
-                        return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations)                        
+                        return retry()
                     case concurrent.futures.CancelledError | builtins.UnboundLocalError:
                         pass
                     case _:
                         traceback.print_exception(r)
-                        
-    cancel()
+    
+    for task in tasks:
+        task.cancel()
 
     return simulations
 
@@ -358,7 +343,7 @@ def _simulate(
         bif_max: int,
         total_counts: _AtomicCounts,
         model_counts: _AtomicCounts,
-    ) -> list[tuple[pd.DataFrame, pd.DataFrame, BifType]]:
+    ) -> _ModelOutput:
     
     """
     Created on Wed Jul 31 10:05:17 2019
@@ -389,7 +374,7 @@ def _simulate(
     sigma = np.sqrt(2*rrate) * sigma_tilde * rv_tri
 
     # Only simulate bifurcation types that have count below bif_max
-    sims: list[tuple[pd.Series, pd.Series, int]] = []
+    sims: _ModelOutput = []
     
     # Define length of simulation
     # This is 200 points longer than ts_len
@@ -445,7 +430,7 @@ def _simulate(
         
         for model in branches:
             
-            bif_type = (model['type'], null)
+            bif_type: BifType = (model['type'], null)
             
             if (
                 total_counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max) and
@@ -465,13 +450,11 @@ def _simulate(
                 if trans_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).cmpxchg_strong(0, 1).success:
                     df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
                     # Have time-series start at time t=0
-                    df_cut['Time'] = df_cut['Time']-df_cut['Time'][0]
-                    df_cut.set_index('Time', inplace=True)
+                    df_cut["time"] = df_cut["time"]-df_cut["time"][0]
+                    df_cut.set_index("time", inplace=True)
                     sims.append((
                         # Simulations
-                        df_cut['x'], 
-                        # Residuals
-                        compute_residuals(df_cut['x']),
+                        df_cut['x'],
                         # Label
                         bif_type,
                     ))
@@ -549,21 +532,6 @@ def _create_groups(
     # Use numbers 1 for training, 2 for validation and 3 for testing
     # Use raito 38:1:1
 
-    # Collect Fold bifurcations (label 0)
-    df_fold = df_labels[df_labels['class_label'] == 0].copy()
-    # Collect Hopf bifurcations (label 1)
-    df_hopf = df_labels[df_labels['class_label']==1].copy()
-    # Collect Branch points (label 2)
-    df_branch = df_labels[df_labels['class_label']==2].copy()
-    # Collect Null labels (label 3)
-    df_null = df_labels[df_labels['class_label']==3].copy()
-
-    # Check they all have the same length
-    assert bif_max == len(df_fold)
-    assert len(df_fold) == len(df_hopf)
-    assert len(df_hopf) == len(df_branch)
-    assert len(df_branch) == len(df_null)
-
     # Compute number of bifurcations for each group
     num_validation = int(np.floor(bif_max*validation_percentage))
     num_test = int(np.floor(bif_max*test_percentage))
@@ -571,25 +539,20 @@ def _create_groups(
 
     # Create list of group numbers
     group_nums = [1]*num_train + [2]*num_validation + [3]*num_test
-
-    # Assign group numbers to each bifurcation category
-    df_fold['dataset_ID'] = group_nums
-    df_hopf['dataset_ID'] = group_nums
-    df_branch['dataset_ID'] = group_nums
-    df_null['dataset_ID'] = group_nums
-
-    # Concatenate dataframes and select relevant columns
-    df_groups = pd.concat([df_fold,df_hopf,df_branch,df_null])[[INDEX_COL, 'dataset_ID']]
-    # Sort rows by sequence_ID
-    df_groups.sort_values(by=[INDEX_COL], inplace=True)
     
-    return df_groups
+    # Set group numbers for each classification
+    def to_group(classifier: pd.DataFrame) -> pd.DataFrame:
+        assert bif_max == len(classifier)
+        classifier = classifier[[INDEX_COL]]
+        classifier['dataset_ID'] = group_nums
+        return classifier
+    
+    return pd.concat((to_group(classifier) for _, classifier in df_labels.groupby('class_label'))).sort_values(by=[INDEX_COL])
 
 ################################################################################
 
 import os.path
 import os
-import shutil
 
 def _num_from_label(t: BifType) -> int:
     if t[1]:
@@ -607,51 +570,47 @@ def batch(
     batch_num: int, 
     ts_len: int, 
     bif_max: int,
-    pool: Union[Executor, None, Callable[[], Executor]],
-    # max_task_count: Callable[[Executor], int],
     path: Union[None, str] = None,
     ) -> TrainData:
     
-    def max_task_count(e: Executor) -> int:
-        return e._max_workers if e is concurrent.futures.ThreadPoolExecutor or e is concurrent.futures.ProcessPoolExecutor else os.cpu_count()
-    
-    def pool_generator(pool: Executor):
-        tasks: list[Future[_ModelOutput]] = []
-        while counts < bif_max:
-            while len(tasks) < max_task_count(tasks) // 10:
-                tasks.append(
-                    pool.submit(
-                        _gen_model,
+    def generator():
+        pool = ThreadPoolExecutor()
+        if pool._max_workers // 10 > 0:
+            tasks: list[Future[_ModelOutput]] = []
+            while counts < bif_max:
+                while len(tasks) < pool._max_workers // 10:
+                    tasks.append(
+                        pool.submit(
+                            _gen_model,
+                            ts_len=ts_len,
+                            bif_max=bif_max,
+                            total_counts=counts,
+                            pool=pool,
+                        )
+                    )
+                concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
+                for task in tasks:
+                    if task.done():
+                        match task.exception():
+                            case None:
+                                tasks.remove(task)
+                                yield task.result()
+                            case e:
+                                match type(e):
+                                    case concurrent.futures.CancelledError:
+                                        pass
+                                    case _:
+                                        traceback.print_exception(e)
+            for task in tasks:
+                task.cancel()
+        else:
+            while counts < bif_max:
+                yield _gen_model(
                         ts_len=ts_len,
                         bif_max=bif_max,
                         total_counts=counts,
                         pool=pool,
                     )
-                )
-            concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
-            for task in tasks:
-                if task.done():
-                    match task.exception():
-                        case None:
-                            tasks.remove(task)
-                            yield task.result()
-                        case e:
-                            match type(e):
-                                case concurrent.futures.CancelledError:
-                                    pass
-                                case _:
-                                    traceback.print_exception(e)
-        for task in tasks:
-            task.cancel()
-        
-    def single_generator():
-        while counts < bif_max:
-            yield _gen_model(
-                    ts_len=ts_len,
-                    bif_max=bif_max,
-                    total_counts=counts,
-                    pool=None,
-                )
     
     print("Batch", batch_num, "start")
     
@@ -665,8 +624,7 @@ def batch(
     if path is not None:
         path = os.path.join(path, f"batch{batch_num}/")
         os.makedirs(path, exist_ok=True)
-        os.makedirs(os.path.join(path, f"output_sims/"), exist_ok=True)
-        os.makedirs(os.path.join(path, f"output_resids/"), exist_ok=True)
+        os.makedirs(os.path.join(path, f"sims/"), exist_ok=True)
         try:
             labels_path = os.path.join(path, "labels.csv")
             
@@ -679,8 +637,7 @@ def batch(
                 type: BifType = (bif, null)
                 if counts.count(type) < bif_maximum(type, bif_max):
                     simulations[seq_id] = (
-                        pd.read_csv(os.path.join(path, f"output_sims/tseries{seq_id}.csv")), 
-                        pd.read_csv(os.path.join(path, f"output_resids/resids{seq_id}.csv")), 
+                        pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv")),
                         (bif, null)
                     )
                     counts.inc(type)
@@ -698,19 +655,16 @@ def batch(
     
     current = max(simulations.keys()) + 1 if len(simulations) != 0 else 1
     
-    generator = single_generator() if pool is None or max_task_count(pool) // 10 == 0 else pool_generator(pool)
-    
-    for results in generator:
+    for results in generator():
         added = set()
         for result in results:
-            type = result[2]
+            type = result[1]
             if counts.count(type) < bif_maximum(type=type, bif_max=bif_max) and not (any((t, True) in added for t in BIFS) if type[1] else type in added):
                 simulations[current] = result
                 counts.inc(type)
                 added.add(type)
                 if label_file is not None:
-                    result[0].to_csv(os.path.join(path, f"output_sims/tseries{current}.csv"))
-                    result[1].to_csv(os.path.join(path, f"output_resids/resids{current}.csv"))
+                    result[0].to_csv(os.path.join(path, f"sims/tseries{current}.csv"))
                     label_file.write(f"{current},{_num_from_label(type)},{type[0]},{type[1]}\n")
                 current += 1
 
@@ -735,22 +689,17 @@ def batch(
     if path is not None:
         df_labels.to_csv(os.path.join(path, "labels.csv"), index=False)
         df_groups.to_csv(os.path.join(path, "groups.csv"), index=False)
-        
-        # shutil.make_archive(os.path.join('output_sims.zip'), 'zip', sims_path)
-        # shutil.make_archive(os.path.join('output_resids.zip'), 'zip', resids_path)
     
     print("Batch", batch_num, "finished")    
     return simsresids, df_labels, df_groups, counts
 
 # Returns (list(sims, resids), labels, groups)
 def multibatch(
-        sim_pool: Union[Executor, None, Callable[[], Executor]], 
         batches: Sequence[int], 
         ts_len: int, 
         bif_max: int,
         batch_pool: Executor, 
         path: Union[str, None] = None,
-        combine: bool = True,
     ) -> TrainData:
         
     if any(b <= 0 for b in batches):
@@ -758,44 +707,22 @@ def multibatch(
     
     if len(batches) == 0:
         raise ValueError("Please provide a non empty batch list!")
-    
-    generator = lambda: batch_pool.map(
+
+    if len(batches) > 1:
+        return combine_batches(batch_pool.map(
             batch, 
             batches, 
             [ts_len] * len(batches), 
             [bif_max] * len(batches), 
-            [sim_pool] * len(batches), 
             [path] * len(batches),
-        )  if len(batches) > 1 else [batch(
+        ))  
+    else: 
+        return batch(
             batch_num=batches[0],
             ts_len=ts_len, 
-            bif_max=bif_max, 
-            pool=sim_pool, 
+            bif_max=bif_max,
             path=path,
-        )]
-        
-    if path is None or not combine:
-        return generator()
-    else:    
-        simsresids, labels, groups = combine_batches(generator())
-        
-        os.makedirs(path, exist_ok=True)
-        
-        sims_path = os.path.join(path, "output_sims/")
-        os.makedirs(sims_path, exist_ok=True)
-        resids_path = os.path.join(path, "output_resids/")
-        os.makedirs(resids_path, exist_ok=True)
-        for i in labels[INDEX_COL]:
-            sim, resids = simsresids[i]
-            sim.to_csv(os.path.join(sims_path, f"tseries{i}.csv"))
-            resids.to_csv(os.path.join(resids_path, f"resids{i}.csv"))
-            
-        shutil.make_archive(os.path.join('output_sims.zip'), 'zip', sims_path)
-        shutil.make_archive(os.path.join('output_resids.zip'), 'zip', resids_path)
-            
-        labels.to_csv(os.path.join(path, "labels.csv"), index=False)
-        groups.to_csv(os.path.join(path, "groups.csv"), index=False)
-        return simsresids, labels, groups
+        )
     
 def run_with_args():
     
@@ -808,7 +735,6 @@ def run_with_args():
     parser.add_argument('-s', '--batch-start', type=int, default=1)
     parser.add_argument('-l', '--length', type=int)
     parser.add_argument('-m', '--bifurcations', type=int, default=1000)
-    parser.add_argument('-c', '--combine', type=bool, default=True)
     args = parser.parse_args()
     
     batches = list(range(args.batch_start, args.batch_start + args.batches))
@@ -845,8 +771,7 @@ def run_with_args():
         batches=batches, 
         ts_len=args.length, 
         bif_max=args.bifurcations,
-        path=args.output, 
-        combine=args.combine
+        path=args.output,
     )
     
 if __name__ == "__main__":
