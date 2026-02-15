@@ -16,8 +16,10 @@ import random
 from typing import Final, Literal, Union
 import numpy as np
 import pandas as pd
+import atomics
+import atomics.base
 
-from ..lstm import INDEX_COL, TrainData, combine_batches, compute_residuals
+from ..lstm import INDEX_COL, Sims, TrainData, combine_batches, compute_residuals
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
@@ -32,7 +34,7 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precisio
 
 def _read_batch(dir) -> tuple[TrainData, int]:
     print(f"Reading {dir}...")
-    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
+    groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
     
     if len(groups) == 0:
         raise RuntimeError("Empty labels file!")
@@ -45,7 +47,7 @@ def _read_batch(dir) -> tuple[TrainData, int]:
     
     return (sims, pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL), groups), ts_len
 
-def _read_input_folder(input: str) -> tuple[TrainData, int]:
+def _read_input_folder(input: str) -> tuple[Sims, pd.DataFrame, int]:
     try:
         entries = os.listdir(input)
         if "groups.csv" in entries:
@@ -63,7 +65,8 @@ def _read_input_folder(input: str) -> tuple[TrainData, int]:
     except Exception as e:
         raise RuntimeError("Could not read input folder with error:", e) 
     
-    return batches, ts_len
+    sims, df_labels, df_groups = batches
+    return sims, pd.merge(df_groups, df_labels, left_index=True, right_index=True), ts_len
 
 def train_lstm_from_batches(
     input: str,
@@ -78,14 +81,9 @@ def train_lstm_from_batches(
     kernel_initializer: str = 'lecun_normal',
     optimizer: Optimizer = Adam(learning_rate = 0.0005),
 ) -> Sequential:
+    
     output = input if output is None else output
-    
-    batches, ts_len = _read_input_folder(input)
-                
-    sims, df_targets, df_groups = batches
-    
-    print("Setting up training data...")
-    
+        
     match type:
         case "lrpad":
             pad_left = (ts_len // 2) - 25
@@ -93,13 +91,20 @@ def train_lstm_from_batches(
         case "lpad":
             pad_left = ts_len - 50
             pad_right = 0
+        case _:
+            raise ValueError("Please provide valid type as input: lrpad, lpad")
+    
+    sims, labels, ts_len = _read_input_folder(input)
+    
+    print("Computing training data from simulations...")
 
     # apply train/test/validation labels
     
+    counter: atomics.base.AtomicUint = atomics.atomic(width=4, type=atomics.UINT)
+    counter.store(0)
     
     def to_traindata(tsid: int) -> np.ndarray:
-        sim = sims[tsid]
-        values = compute_residuals(sim).to_numpy(copy=True)
+        values = compute_residuals(sims[tsid]).to_numpy(copy=True)
         
         # Padding and normalizing input sequences
         values[:int(pad_left * random.uniform(0, 1))] = 0
@@ -107,16 +112,22 @@ def train_lstm_from_batches(
         
         avg = sum(np.abs(values)) / np.count_nonzero(values)
         
-        return values / avg
+        values = values / avg
+        
+        num = counter.fetch_inc() + 1
+        if num > 0 and num % 100 == 0:
+            print("Calculated", num, "residuals out of", len(sims))    
+        
+        return values
     
     pool = ThreadPoolExecutor()
-    labelled_seq = lambda label: np.array(list(pool.map(to_traindata, df_groups[df_groups["dataset_ID"] == label].index)))
+    labelled_seq = lambda label: np.array(list(pool.map(to_traindata, labels[labels["dataset_ID"] == label].index)))
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
     test = labelled_seq(3)
     
-    labelled_class_seq = lambda label: df_targets[df_groups["dataset_ID"] == label]["class_label"].to_numpy()
+    labelled_class_seq = lambda label: labels[labels["dataset_ID"] == label]["class_label"].to_numpy()
     
     train_target = labelled_class_seq(1)
     validation_target = labelled_class_seq(2)

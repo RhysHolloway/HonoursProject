@@ -16,6 +16,7 @@ import builtins
 import copy
 import traceback
 import atomics
+from atomics.base import AtomicUint
 import numpy as np
 import ruptures
 from typing import Any, Callable, Final, Self, Sequence, Union
@@ -190,12 +191,17 @@ class _Counts(metaclass = abc.ABCMeta):
     def __str__(self: Self) -> str:
         return ", ".join((("Null " if null else "") + type + ": " + str(self.count((type, null)))) for type, null in bif_types())
 
+def _init_atomic(_: BifType) -> AtomicUint:
+    counter: AtomicUint = atomics.atomic(width=4, atype=atomics.UINT)
+    counter.store(0)
+    return counter
+
 class _AtomicCounts(_Counts):
     
     def __init__(self):
-        super().__init__(lambda _: atomics.atomic(width=4, atype=atomics.INT))
+        super().__init__(_init_atomic)
     
-    def _get(self, type: BifType) -> atomics.INT:
+    def _get(self, type: BifType) -> AtomicUint:
         return getattr(self, _Counts.attr(type))
     
     def count(self, type: BifType) -> int:
