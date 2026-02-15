@@ -9,7 +9,7 @@ trap on_exit INT
 
 DIR=$(dirname ${BASH_SOURCE[0]})
 
-BATCHES=10
+BATCHES=25
 
 source $DIR/env.sh
 

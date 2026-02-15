@@ -83,6 +83,8 @@ def train_lstm_from_batches(
 ) -> Sequential:
     
     output = input if output is None else output
+    
+    sims, labels, ts_len = _read_input_folder(input)
         
     match type:
         case "lrpad":
@@ -94,7 +96,6 @@ def train_lstm_from_batches(
         case _:
             raise ValueError("Please provide valid type as input: lrpad, lpad")
     
-    sims, labels, ts_len = _read_input_folder(input)
     
     print("Computing training data from simulations...")
 
