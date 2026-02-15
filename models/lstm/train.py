@@ -9,6 +9,7 @@ Modified model training script for the tipping point-detecting deep learning mod
 
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import os.path
 import random
@@ -31,14 +32,14 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precisio
 
 def _read_batch(dir) -> tuple[TrainData, int]:
     print(f"Reading {dir}...")
-    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL) 
+    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL).iloc[:,0]
     
     if len(groups) == 0:
         raise RuntimeError("Empty labels file!")
 
-    sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv")) for seq_id in groups.index.values}
+    sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['x'] for seq_id in groups.index.values}
     
-    ts_len = len(next(iter(sims.values()))[0])
+    ts_len = len(next(iter(sims.values())))
     
     print("Read", dir)
     
@@ -63,6 +64,19 @@ def _read_input_folder(input: str) -> tuple[TrainData, int]:
         raise RuntimeError("Could not read input folder with error:", e) 
     
     return batches, ts_len
+
+
+def _to_traindata(tup: tuple[pd.Series, int, int]) -> np.ndarray:
+    sim, pad_left, pad_right = tup
+    values = compute_residuals(sim).to_numpy(copy=True)
+    
+    # Padding and normalizing input sequences
+    values[:int(pad_left * random.uniform(0, 1))] = 0
+    values[len(values)-int(pad_right * random.uniform(0, 1)):] = 0
+    
+    avg = sum(np.abs(values)) / np.count_nonzero(values)
+    
+    return values / avg
 
 def train_lstm_from_batches(
     input: str,
@@ -93,20 +107,10 @@ def train_lstm_from_batches(
             pad_left = ts_len - 50
             pad_right = 0
 
-    def transform(sim: pd.Series) -> np.ndarray:
-        values = compute_residuals(sim).to_numpy(copy=True)
-        
-        # Padding and normalizing input sequences
-        values[:int(pad_left * random.uniform(0, 1))] = 0
-        values[len(values)-int(pad_right * random.uniform(0, 1)):] = 0
-        
-        avg = sum(np.abs(values)) / np.count_nonzero(values)
-        
-        return values / avg
-
     # apply train/test/validation labels
     
-    labelled_seq = lambda label: np.array([transform(sims[tsid][1]) for tsid in df_groups[df_groups["dataset_ID"] == label].index])
+    pool = ThreadPoolExecutor()
+    labelled_seq = lambda label: np.array(list(pool.map(_to_traindata, df_groups[df_groups["dataset_ID"] == label].index.map(lambda tsid: (sims[tsid], pad_left, pad_right)))))
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
