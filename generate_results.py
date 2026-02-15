@@ -10,7 +10,7 @@ from models.lstm.test import test as test_lstm
 # DLM().run_with_output([Lisiecki, Scotese, Judd], plot_path=output)
 # HMM().run_with_output([Lisiecki, Scotese, Judd], plot_path=output)
 
-loader = LSTMLoader(get_project_path("output/models/lstm/"), extension="h5")
+loader = LSTMLoader(get_project_path("output/models/lstm/"))
 LSTM = loader.with_args(verbose=False)
 
 LSTM.run_with_output(map(Dataset.normalize, [Scotese, JuddGMST, JuddCO2]), print=False, plot_path=output)

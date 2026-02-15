@@ -432,10 +432,9 @@ if __name__ == "__main__":
                     description='Tests trained models against simulated data')
     parser.add_argument('modelpath', type=str)
     parser.add_argument('output', type=str)
-    parser.add_argument('--extension', '-e', type=str)
     args = parser.parse_args()
     
-    lstm = LSTMLoader(args.modelpath, extension=args.extension).with_args(verbose=False)
+    lstm = LSTMLoader(args.modelpath).with_args(verbose=False)
     
     test(lstm, models=generate_test_models(), output=args.output)
     

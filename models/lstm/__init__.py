@@ -11,29 +11,28 @@ from matplotlib.figure import Figure
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
-from keras.models import load_model, Model
+from keras.models import load_model, Model as KerasModel
 
 class LSTMLoader:
     
-    def __init__(self: Self, path: str, extension: str = ".keras"):
+    def __init__(self: Self, path: str):
         import os
         import os.path
         import functools
         
-        if not extension.startswith("."):
-            extension = "." + extension
+        EXTENSIONS = [".keras", ".h5"]
             
-        def load(dir: str) -> list[Model]:
+        def load(dir: str) -> list[KerasModel]:
             dir = os.path.join(path, dir)
             if not os.path.exists(dir):
                 return []
-            return [load_model(os.path.join(dir, name)) for name in os.listdir(dir) if name.endswith(extension)]
+            return [load_model(os.path.join(dir, name)) for name in os.listdir(dir) if any(name.endswith(ext) for ext in EXTENSIONS)]
         
         self._500models = load("len500")
         self._1500models = load("len1500")
         
         if sum(map(len, [self._500models, self._1500models])) == 0:
-            raise ValueError(f"Could not load any {extension} models from {path}!")
+            raise ValueError(f"Could not load any models from {path}!")
         
         self.with_args = functools.partial(LSTM, get_models=self._get_models)
     
@@ -50,7 +49,7 @@ class LSTM(Model[pd.DataFrame]):
         
     def __init__(
         self: Self,
-        get_models: Callable[[pd.Series], Sequence[Model]],
+        get_models: Callable[[pd.Series], Sequence[KerasModel]],
         bandwidth: float = 0.2,
         verbose: bool = True,
     ):
