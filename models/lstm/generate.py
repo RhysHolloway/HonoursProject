@@ -696,7 +696,7 @@ def batch(
 # Returns (list(sims, resids), labels, groups)
 def multibatch(
         batches: Sequence[int], 
-        ts_len: int, 
+        ts_len: int,
         bif_max: int,
         batch_pool: Executor, 
         path: Union[str, None] = None,
@@ -767,7 +767,6 @@ def run_with_args():
 
     multibatch(
         batch_pool=pool, 
-        sim_pool=concurrent.futures.ThreadPoolExecutor, 
         batches=batches, 
         ts_len=args.length, 
         bif_max=args.bifurcations,
