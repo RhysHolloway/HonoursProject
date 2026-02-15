@@ -678,7 +678,7 @@ def batch(
     df_labels: pd.DataFrame = pd.DataFrame(
         (
             (i, _num_from_label(label), label[0], label[1])
-            for i, (_, _, label) in simulations.items()
+            for i, (_, label) in simulations.items()
         ), columns = LABEL_COLS,
     )
     
