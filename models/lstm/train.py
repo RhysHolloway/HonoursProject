@@ -32,7 +32,7 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precisio
 
 def _read_batch(dir) -> tuple[TrainData, int]:
     print(f"Reading {dir}...")
-    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL).iloc[:,0]
+    groups = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
     
     if len(groups) == 0:
         raise RuntimeError("Empty labels file!")
@@ -65,19 +65,6 @@ def _read_input_folder(input: str) -> tuple[TrainData, int]:
     
     return batches, ts_len
 
-
-def _to_traindata(tup: tuple[pd.Series, int, int]) -> np.ndarray:
-    sim, pad_left, pad_right = tup
-    values = compute_residuals(sim).to_numpy(copy=True)
-    
-    # Padding and normalizing input sequences
-    values[:int(pad_left * random.uniform(0, 1))] = 0
-    values[len(values)-int(pad_right * random.uniform(0, 1)):] = 0
-    
-    avg = sum(np.abs(values)) / np.count_nonzero(values)
-    
-    return values / avg
-
 def train_lstm_from_batches(
     input: str,
     output: Union[str, None],
@@ -109,8 +96,21 @@ def train_lstm_from_batches(
 
     # apply train/test/validation labels
     
+    
+    def to_traindata(tsid: int) -> np.ndarray:
+        sim = sims[tsid]
+        values = compute_residuals(sim).to_numpy(copy=True)
+        
+        # Padding and normalizing input sequences
+        values[:int(pad_left * random.uniform(0, 1))] = 0
+        values[len(values)-int(pad_right * random.uniform(0, 1)):] = 0
+        
+        avg = sum(np.abs(values)) / np.count_nonzero(values)
+        
+        return values / avg
+    
     pool = ThreadPoolExecutor()
-    labelled_seq = lambda label: np.array(list(pool.map(_to_traindata, df_groups[df_groups["dataset_ID"] == label].index.map(lambda tsid: (sims[tsid], pad_left, pad_right)))))
+    labelled_seq = lambda label: np.array(list(pool.map(to_traindata, df_groups[df_groups["dataset_ID"] == label].index)))
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
