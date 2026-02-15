@@ -673,7 +673,7 @@ def batch(
     
     print("Batch", batch_num, "finished generating")
         
-    simsresids = {i:(sims, resids) for i, (sims, resids, _) in simulations.items()}
+    sims = {i:sims for i, (sims, _) in simulations.items()}
 
     df_labels: pd.DataFrame = pd.DataFrame(
         (
@@ -689,9 +689,9 @@ def batch(
         df_groups.to_csv(os.path.join(path, "groups.csv"), index=False)
     
     print("Batch", batch_num, "finished")    
-    return simsresids, df_labels, df_groups, counts
+    return sims, df_labels, df_groups, counts
 
-# Returns (list(sims, resids), labels, groups)
+# Returns (sims, labels, groups)
 def multibatch(
         batches: Sequence[int], 
         ts_len: int,

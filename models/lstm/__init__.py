@@ -242,7 +242,7 @@ type Labels = pd.DataFrame
 type Groups = pd.DataFrame
 type TrainData = tuple[dict[int, Sims], Labels, Groups]
 
-# Returns combined (indexed sims + resids, labels, groups)
+# Returns combined (indexed sims, labels, groups)
 def combine_batches(batches: Iterable[TrainData]) -> TrainData:
     
     def _reduce_combine(
