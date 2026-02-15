@@ -626,9 +626,9 @@ def batch(
             labels_path = os.path.join(path, "labels.csv")
             
             if not os.path.exists(labels_path):
-                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path)
+                pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path, index_label=INDEX_COL)
             
-            labels = pd.read_csv(labels_path)
+            labels = pd.read_csv(labels_path, index_col=INDEX_COL)
             
             for seq_id, bif, null in labels[['bif', 'null']].itertuples(index=True, name=None):
                 biftype: BifType = (bif, null)
