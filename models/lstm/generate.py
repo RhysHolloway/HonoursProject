@@ -445,7 +445,7 @@ def _simulate(
                 # Detect a jump to another state (in time-series prior to infinity jump)
                 # Break points - higher penalty means less likely to detect jumps, get first jump
                 t_jump = ruptures.Window(width=10, model="l2", jump=1, min_size=2).fit(
-                    compute_residuals(sim.loc[:t_nan], span = 0.2).to_numpy().T
+                    compute_residuals(sim.iloc[:t_nan], span = 0.2).to_numpy().T
                 ).predict(pen=1, n_bkps=1)[0] - 1
                 
                 # Output minimum of tnan or tjump
