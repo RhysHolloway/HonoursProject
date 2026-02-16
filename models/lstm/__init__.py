@@ -1,4 +1,5 @@
-from typing import Final, Self, Sequence, Callable
+import functools
+from typing import Final, OrderedDict, Self, Sequence, Callable
 from models import Column, Dataset, Model
 
 import numpy as np
@@ -11,7 +12,7 @@ from matplotlib.figure import Figure
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
-from keras.models import load_model, Model as KerasModel
+from keras.models import load_model, Sequential as KerasModel
 
 class LSTMLoader:
     
@@ -21,28 +22,31 @@ class LSTMLoader:
         import functools
         
         EXTENSIONS = [".keras", ".h5"]
-            
-        def load(dir: str) -> list[KerasModel]:
-            dir = os.path.join(path, dir)
-            if not os.path.exists(dir):
-                return []
-            return [load_model(os.path.join(dir, name)) for name in os.listdir(dir) if any(name.endswith(ext) for ext in EXTENSIONS)]
         
-        self._500models = load("len500")
-        self._1500models = load("len1500")
+        found: dict[int, list[KerasModel]] = dict()
         
-        if sum(map(len, [self._500models, self._1500models])) == 0:
+        for path, _, files in os.walk(path):
+            for file in files:
+                file_path = os.path.join(path, file)
+                if os.path.isfile(file_path) and any(file.endswith(ext) for ext in EXTENSIONS):
+                    model: KerasModel = load_model(file_path)
+                    ts_len = model.input_shape[1]
+                    if ts_len not in found:
+                        found[ts_len] = list()
+                    found[ts_len].append(model)
+        
+        if len(found) == 0:
             raise ValueError(f"Could not load any models from {path}!")
         
-        self.with_args = functools.partial(LSTM, get_models=self._get_models)
+        self.models: Final[OrderedDict[int, KerasModel]] = OrderedDict(sorted(found.items()))
+        
+    @property
+    def with_args(self: Self):
+        return functools.partial(LSTM, get_models=self._get_models)
     
     def _get_models(self: Self, series: pd.Series):
-        if len(self._1500models) == 0:
-            return self._500models
-        elif len(self._500models) == 0:
-            return self._1500models
-        else:
-            return self._1500models if len(series) > 500 else self._500models
+        # Get the model with the closest input length lower or equal to the input series length (or else get the model with the lowest input length if none can be found)
+        return self.models[next((ts_len for ts_len in reversed(self.models.keys()) if ts_len <= len(series)), next(iter(self.models.keys())))]
 
 type LSTMPeaks = dict[Column, dict[str, Sequence[int]]]
 class LSTM(Model[pd.DataFrame]):
@@ -51,6 +55,7 @@ class LSTM(Model[pd.DataFrame]):
         self: Self,
         get_models: Callable[[pd.Series], Sequence[KerasModel]],
         bandwidth: float = 0.2,
+        spacing: int = 10,
         verbose: bool = True,
     ):
         super().__init__("CNN-LSTM")
@@ -58,6 +63,7 @@ class LSTM(Model[pd.DataFrame]):
         self.get_models = get_models
         self.bandwidth = bandwidth
         self.verbose = verbose
+        self.spacing = spacing
         self.result_means: dict[Dataset, LSTMPeaks] = dict()
         self.result_peaks: dict[Dataset, LSTMPeaks] = dict()
     
@@ -67,7 +73,6 @@ class LSTM(Model[pd.DataFrame]):
     def run_on_series(
         self: Self,
         series: pd.Series,
-        spacing: int = 10
     ):
         list_df: list[pd.DataFrame] = []
         series = pd.Series(series.to_numpy(), index=-series.index, name=series.name)[::-1]
@@ -85,7 +90,7 @@ class LSTM(Model[pd.DataFrame]):
         for model in model_list:
 
             tmax_dfs: list[pd.DataFrame] = []
-            for tmax in np.arange(spacing, len(series), spacing):
+            for tmax in np.arange(self.spacing, len(series), self.spacing):
                 
                 input = series[series.index[:tmax]].to_numpy()
                 input = input / np.mean(np.abs(input))
@@ -105,7 +110,7 @@ class LSTM(Model[pd.DataFrame]):
             list_df.append(df)
             
         df = self.calc_means(pd.concat(list_df))
-        df.insert(0, "variable", series.name)
+        df.insert(0, "variable", [series.name] * len(df))
         return df
     
     @staticmethod
@@ -131,7 +136,7 @@ class LSTM(Model[pd.DataFrame]):
             }
         
         peaks = {feature:subset(df.set_index("time")) for feature, df in predictions.groupby("variable")} 
-        if means:
+        if means is not None:
             peaks[None] = subset(means)
         return peaks
 
@@ -140,6 +145,8 @@ class LSTM(Model[pd.DataFrame]):
         dataset: Dataset
     ) -> pd.DataFrame:
         if dataset not in self.result_means:
+            if dataset not in self.results:
+                self.run(dataset)
             self.result_means[dataset] = self.calc_means(self.results[dataset])
         return self.result_means[dataset]
 
@@ -150,7 +157,8 @@ class LSTM(Model[pd.DataFrame]):
         distance: int = 10,
     ) -> LSTMPeaks:
         if dataset not in self.result_peaks:
-            self.result_peaks[dataset] = self.calc_peaks(self.results[dataset], self.means(dataset), prominence, distance)
+            means = self.means(dataset)
+            self.result_peaks[dataset] = self.calc_peaks(self.results[dataset], means, prominence, distance)
         return self.result_peaks[dataset]
         
 
@@ -177,27 +185,27 @@ class LSTM(Model[pd.DataFrame]):
                 
         fig = plt.figure(figsize=(9, 12))
         fig.suptitle(f"Bifurcation classifications on {dataset.name}")
-        
+
         preds = self.results[dataset]
-        
-        means = self.means(preds)
-        peaks = self.peaks(preds, means)
+        means = self.means(dataset)
+        peaks = self.peaks(dataset)
         
         def plot_peak(ax: Axes, df: pd.DataFrame, col: str):
             indices = peaks[feature][col]
             ax.scatter(df.index[indices], df.iloc[indices])
         
-        subplots: Sequence[Axes] = fig.subplots(nrows=len(self.COLUMNS), ncols=1, sharex='all')
+        subplots: Sequence[Axes] = fig.subplots(nrows=len(self.COLUMNS), ncols=1, sharex='all', sharey='all')
         
         mean_ax = subplots[-1]
         mean_ax.invert_xaxis()
+        mean_ax.set_autoscaley_on(False)
         mean_ax.set_xlabel(f"Age ({dataset.age_format})")
         mean_ax.set_ylabel("Mean Feature Probability")
         
         for i, col in enumerate(self.COLUMNS[:-1]): # All besides null column, which
             ax = subplots[i]
             ax.set_ylabel(col + " Probability")
-            for feature, data in dataset.features().groupby("variable"):
+            for feature, data in preds.groupby("variable"):
                 data = data.set_index("time")[col]
                 ax.plot(data.index, data)
                 plot_peak(ax, data, col)

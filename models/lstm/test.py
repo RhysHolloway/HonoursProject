@@ -1,4 +1,5 @@
-from typing import Any, Callable, Iterable, Sequence
+import functools
+from typing import Any, Callable, Final, Hashable, Iterable, Sequence
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 import numpy as np
@@ -6,31 +7,33 @@ import pandas as pd
 from scipy import stats
 from sklearn import metrics
 import matplotlib.pyplot as plt
+import os.path
 
 from models.metrics import Metrics
 
 from ..lstm import LSTMLoader, Dataset, LSTM, StochSim, XY, DeFunc
 
 def simulate(
+    lengths: Sequence[int],
     de_fun: DeFunc,
     bl: float, 
     bh: float, 
-    bcrit: float, 
-    ts_len: int,
+    bcrit: float,
     init: XY,
     sigma: XY | float,
     sims: int,
     name: str = ""
-) -> tuple[list[Dataset], Any]:
+) -> list[tuple[list[Dataset], float]]:
     assert sims > 0
     
+    max_len = max(lengths)
     model = StochSim(
         binit=bl,
         bcrit=bh,
-        ts_len=ts_len,
+        ts_len=max_len,
     )
     
-    def sim_tsid(tsid: int) -> pd.Series:
+    def sim_tsid(tsid: int) -> Dataset:
         df: pd.DataFrame = model.simulate(
             de_fun=de_fun,
             s0=init,
@@ -40,17 +43,40 @@ def simulate(
         
         # Use only x ()
         df = df[["p0"]]
+        df.insert(0,"tsid", tsid)
         
         return Dataset(
-            name=f"{name}{"_" if len(name) != 0 else ""}{tsid}_len{ts_len}",
+            name=f"{name}{"_" if len(name) != 0 else ""}{tsid}_len{len(df)}",
             df=df,
-            feature_cols=Dataset._convert_feature_cols(df.columns),
+            feature_cols=Dataset._convert_feature_cols(df.columns.drop("tsid")),
             age_format="",
         )
+        
+    maximums = (list(map(sim_tsid, range(1, sims + 1))), model.parameter[model.parameter > bcrit].index[1])
     
-    return (list(map(sim_tsid, range(1, sims + 1))), model.parameter[model.parameter > bcrit].index[1]) 
+    def of_length(ts_len: int):
+        return [
+            Dataset(
+                name=f"{name}{"_" if len(name) != 0 else ""}{tsid+1}_len{ts_len}",
+                df=dataset.df.iloc[-ts_len:],
+                feature_cols=dataset.feature_cols,
+                age_format="",
+            )
+        for tsid, dataset in enumerate(maximums[0])], maximums[1]
+    
+    sims: list[tuple[list[Dataset], float]] = []
+    
+    for ts_len in lengths:
+        if ts_len != max_len:
+            sims.append(of_length(ts_len))
+    
+    sims.append(maximums)
+    return sims 
 
-def may_fold(ts_len: int, sims: int = 10):
+def may_fold(
+    lengths: Sequence[int],
+    sims: int = 10
+):
     
     r = 1  # growth rate
     k = 1  # carrying capacity
@@ -67,17 +93,18 @@ def may_fold(ts_len: int, sims: int = 10):
         ])
 
     return simulate(
+        lengths=lengths,
         de_fun=de_fun,
         bl=bl,
         bh=bh,
         bcrit=bcrit,
         init=[x0],
         sigma=0.01,
-        ts_len=ts_len,
         sims=sims,
     )
     
-def cr_trans(ts_len: int, sf: int = 4, sims: int = 10):
+def cr_trans(
+    lengths: Sequence[int],sf: int = 4, sims: int = 10):
         
     # Model parameters
     r = 1 * sf
@@ -98,18 +125,19 @@ def cr_trans(ts_len: int, sf: int = 4, sims: int = 10):
             e * a * x * y / (1 + a * h * x) - m * y
         ])
     
-    return simulate(        
+    return simulate( 
+                    lengths=lengths,       
         de_fun=de_fun,
         bl=al,
         bh=ah,
         bcrit=abif,
         init=[x0, y0],
         sigma=0.01,
-        ts_len=ts_len,
         sims=sims,
     )
     
-def cr_hopf(ts_len: int, sf: int = 4, sims: int = 10):
+def cr_hopf(
+    lengths: Sequence[int],sf: int = 4, sims: int = 10):
 
     # Model parameters
     # sf = 4  # scale factor
@@ -134,13 +162,13 @@ def cr_hopf(ts_len: int, sf: int = 4, sims: int = 10):
         ])
         
     return simulate(
+        lengths=lengths, 
         de_fun=de_fun,
         bl=al,
         bh=ah,
         bcrit=abif,
         init=[x0, y0],
         sigma=np.array([sigma_x, sigma_y]),
-        ts_len=ts_len,
         sims=sims,
     )
 
@@ -148,11 +176,11 @@ def compute_roc(
     df_ews_forced: pd.DataFrame, 
     df_ews_null: pd.DataFrame,
     bool_pred_early: bool = True
-) -> tuple[Figure, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     # --------
     # Import EWS and ML data
-    # –------------)
+    # –------------
 
     # # Import EWS data
     # Use EWS data in x
@@ -162,20 +190,6 @@ def compute_roc(
     
     def ml_df(df: pd.DataFrame):
         return df[["tsid", "time"] + LSTM.COLUMNS].dropna()
-    
-    df_ktau_forced = ktau_df(df_ews_forced)
-    df_ktau_null = ktau_df(df_ews_null)
-        
-    df_ml_forced = ml_df(df_ews_forced)
-    df_ml_null = ml_df(df_ews_null)
-
-    # Add column for truth values (1 for forced, 0 for null)
-    df_ktau_forced["truth value"] = 1
-    df_ktau_null["truth value"] = 0
-
-    df_ml_forced["truth value"] = 1
-    df_ml_null["truth value"] = 0
-
 
     # ---------------------------
     # Get predictions from trajectories
@@ -189,103 +203,39 @@ def compute_roc(
         # Late interval for predictions
         pred_interval_rel = np.array([0.8, 1])
 
-
-    # Initialise lists
-    list_df_ktau_preds: list[pd.DataFrame] = []
-    list_df_ml_preds: list[pd.DataFrame] = []
-
-    # Get predictions from forced trajectories
-    for tsid in df_ml_forced["tsid"].unique():
-
-        # Get EWS data to find start and transition time
-        df: pd.DataFrame = df_ews_forced[(df_ews_forced["tsid"] == tsid)]
+    def predictions(df: pd.DataFrame, truth: int):
         t_start = df["time"].iloc[0]
-        t_transition = (
-            df[["time", "residuals"]].dropna()["time"].iloc[-1]
-        )  # where the residuals end
+        t_transition = df[["time", "residuals"]].dropna()["time"].iloc[-1] # where the residuals end
 
         # Get prediction interval in time
         t_pred_start = t_start + (t_transition - t_start) * pred_interval_rel[0]
         t_pred_end = t_start + (t_transition - t_start) * pred_interval_rel[1]
 
-        # Get ktau data specific to this variable and tsid.
         # Get data within prediction interval
-        df_ktau_forced_final = df_ktau_forced[
-            (df_ktau_forced["tsid"] == tsid)
-            & (df_ktau_forced["time"] >= t_pred_start)
-            & (df_ktau_forced["time"] <= t_pred_end)
-        ]
-        df_ml_forced_final = df_ml_forced[
-            (df_ml_forced["tsid"] == tsid)
-            & (df_ml_forced["time"] >= t_pred_start)
-            & (df_ml_forced["time"] <= t_pred_end)
-        ]
+        df_timed = df[(df["time"] >= t_pred_start) & (df["time"] <= t_pred_end)]
 
         # Extract 10 evenly spaced predictions across the prediciton time interval
         # We do this so some transitions don't input more data to the ROC
         # than others.
         n_predictions = 10
+        
+        def extract(df: pd.DataFrame):
+            df = df.iloc[np.round(np.linspace(0, len(df) - 1, n_predictions)).astype(int)]
+            df["truth_value"] = truth
+            return df
 
-        # Ktau forced trajectories
-        idx = np.round(np.linspace(0, len(df_ktau_forced_final) - 1, n_predictions)).astype(
-            int
+        return (
+            extract(ktau_df(df_timed)), 
+            extract(ml_df(df_timed))
         )
-        list_df_ktau_preds.append(df_ktau_forced_final.iloc[idx])
-
-        # ML forced trajectories
-        idx = np.round(np.linspace(0, len(df_ml_forced_final) - 1, n_predictions)).astype(
-            int
-        )
-        list_df_ml_preds.append(df_ml_forced_final.iloc[idx])
-
-
-    # Get predictions from null trajectories
-    tsid_vals = df_ml_null["tsid"].unique()
-    for tsid in tsid_vals:
-
-        # Get EWS data to find start and transition time (for forced data)
-        df = df_ews_forced[(df_ews_forced["tsid"] == tsid)]
-        t_start = df["time"].iloc[0]
-        t_transition = (
-            df[["time", "residuals"]].dropna()["time"].iloc[-1]
-        )  # where the residuals end
-
-        # Get prediction interval in time
-        t_pred_start = t_start + (t_transition - t_start) * pred_interval_rel[0]
-        t_pred_end = t_start + (t_transition - t_start) * pred_interval_rel[1]
-
-        # Get ktau data specific to this variable and tsid.
-        # Get data within prediction interval
-        df_ktau_null_final = df_ktau_null[
-            (df_ktau_null["tsid"] == tsid)
-            & (df_ktau_null["time"] >= t_pred_start)
-            & (df_ktau_null["time"] <= t_pred_end)
-        ]
-        df_ml_null_final = df_ml_null[
-            (df_ml_null["tsid"] == tsid)
-            & (df_ml_null["time"] >= t_pred_start)
-            & (df_ml_null["time"] <= t_pred_end)
-        ]
-
-        # Extract 10 evenly spaced predictions across the prediciton time interval
-        # We do this so some transitions don't input more data to the ROC
-        # than others.
-        n_predictions = 10
-
-        # Ktau forced trajectories
-        idx = np.round(np.linspace(0, len(df_ktau_null_final) - 1, n_predictions)).astype(
-            int
-        )
-        list_df_ktau_preds.append(df_ktau_null_final.iloc[idx])
-
-        # ML forced trajectories
-        idx = np.round(np.linspace(0, len(df_ml_null_final) - 1, n_predictions)).astype(int)
-        list_df_ml_preds.append(df_ml_null_final.iloc[idx])
-
+        
+    forced_ktau, forced_ml = zip(*(predictions(df, 1) for _, df in df_ews_forced.groupby("tsid")))
+    null_ktau, null_ml = zip(*(predictions(df, 0) for _, df in df_ews_null.groupby("tsid")))
 
     # Concatenate data
-    df_ktau_preds = pd.concat(list_df_ktau_preds)
-    df_ml_preds = pd.concat(list_df_ml_preds)
+    df_ktau_preds: pd.DataFrame = pd.concat(forced_ktau + null_ktau)
+    df_ml_preds: pd.DataFrame = pd.concat(forced_ml + null_ml)
+    
     df_ml_preds["bif_prob"] = np.sum(df_ml_preds[LSTM.COLUMNS[:-1]].to_numpy(), axis=1)
 
 
@@ -297,7 +247,7 @@ def compute_roc(
     df_ml_preds["fav_bif"] = df_ml_preds[LSTM.COLUMNS].idxmax(axis=1)
 
     # Count each bifurcation choice for forced trajectories
-    counts = df_ml_preds[df_ml_preds["truth value"] == 1]["fav_bif"].value_counts()
+    counts = df_ml_preds[df_ml_preds["truth_value"] == 1]["fav_bif"].value_counts()
 
     df_counts = pd.DataFrame({col.lower():[counts.get(col, 0)] for col in LSTM.COLUMNS})
 
@@ -310,7 +260,7 @@ def compute_roc(
     def roc_compute(df: pd.DataFrame, indicator: str):
 
         # Compute ROC curve and threhsolds using sklearn
-        fpr, tpr, thresholds = metrics.roc_curve(df["truth value"], df[indicator])
+        fpr, tpr, thresholds = metrics.roc_curve(df["truth_value"], df[indicator])
 
         return pd.DataFrame({
             "fpr": fpr, 
@@ -325,7 +275,7 @@ def compute_roc(
     # –--------------------
     
     return {
-        "ML": roc_compute(df_ml_preds, "bif_prob"),
+        "DL Model": roc_compute(df_ml_preds, "bif_prob"),
         "Variance": roc_compute(df_ktau_preds, "ktau_variance"),
         "Lag-1 AC": roc_compute(df_ktau_preds, "ktau_ac1"),
     }, df_counts
@@ -359,30 +309,67 @@ def plot_roc(rocs: dict[str, pd.DataFrame], name: str, ts_len: int):
     
     return fig
 
-type _Models = Iterable[tuple[str, int, tuple[list[Dataset], Any]]]
+type _Model = tuple[str, list[Dataset], float]
 
-def generate_test_models():
-    for ts_len in (500, 1500):
-        for test in (may_fold, cr_hopf, cr_trans):
-            print("Simulating", test.__name__, "for length", ts_len)
-            datasets, tcrit = test(ts_len=ts_len)
-            yield test.__name__, datasets, tcrit
+# def generate_test_models(lengths: Sequence[int] = [1500, 500]):
+#         for test in (may_fold, cr_hopf, cr_trans):
+#             print("Generating", test.__name__, "of lengths", lengths)
+#             for datasets, tcrit in test(lengths=lengths):
+#                     yield test.__name__, datasets, tcrit
+
+def save_test_models(folder: str, models: Iterable[_Model]):
+    import os.path
+    tcrits: dict[int, pd.Series] = dict()
+    os.makedirs(folder, exist_ok=True)
+    for model in models:
+        name, datasets, tcrit = model
+        ts_len = len(datasets[0].df)
+        len_folder = os.path.join(folder, f"len{ts_len}")
+        os.makedirs(len_folder, exist_ok=True)
+        
+        pd.concat([dataset.df.reset_index()[["tsid", "time"] + list(dataset.feature_cols.keys())] for dataset in datasets]).to_csv(os.path.join(len_folder, name + ".csv"), index=False)
+        
+        if ts_len not in tcrits:
+            tcrits[ts_len] = pd.read_csv(os.path.join(len_folder, "transitions.csv"), names=["model", "tcrit"])["tcrit"]
+        
+        tcrits[ts_len][name] = tcrit
     
-def generate_metrics(lstm: LSTM, models: list[Dataset], tcrit: Any) -> tuple[int, pd.DataFrame, pd.DataFrame]:
+    for ts_len, series in tcrits.items():
+        series.to_csv(os.path.join(folder, f"len{ts_len}", "transitions.csv"))
+        
+            
+def read_test_models(folder: str, name: Hashable | None = None):
+    import os.path
+    for len_file in os.listdir(folder):
+        len_folder = os.path.join(folder, len_file)
+        if os.path.isdir(len_folder) and len_file.startswith("len") and len_file[3:].isdigit():
+            ts_len = int(len_file[3:])
+            transitions = pd.read_csv(os.path.join(len_folder, "transitions.csv"), index_col=0, names=["model", "tcrit"])["tcrit"]
+            for mname, tcrit in (transitions.items() if name is None else [(name, transitions[name])]):
+                model = pd.read_csv(os.path.join(len_folder, mname + ".csv"), index_col=False)
+                yield mname, [Dataset(
+                    name=f"{mname}_{tsid}_len{ts_len}",
+                    df=df.set_index("time"),
+                    feature_cols=Dataset._convert_feature_cols(df.columns.drop(["tsid", "time"])),
+                    age_format="",
+                ) for tsid, df in model.groupby("tsid", as_index=False)], tcrit
+            
+type _Metrics = tuple[pd.DataFrame, pd.DataFrame]
+def generate_metrics(name: str, lstm: LSTM, models: list[Dataset], tcrit: float, output: str | None = None) -> _Metrics:
     
     list_df_forced: list[pd.DataFrame] = []
     list_df_null: list[pd.DataFrame] = []
     
     metrics = Metrics(window=0.25, ktau_distance=5)
         
-    def run_metrics(tsid: int, tcrit) -> pd.DataFrame: 
+    def run_metrics(tsid: int, tcrit: float | None) -> pd.DataFrame: 
         list_df: list[pd.DataFrame] = []
         for var in dataset.feature_cols.keys():
             df = metrics.run_on_series(dataset.df[var], transition=tcrit)
-            df = df.join(lstm.calc_means(lstm.run_on_series(df["residuals"])))
+            df = df.join(lstm.calc_means(lstm.run_on_series(series=df["residuals"])))
             df.insert(0, "tsid", tsid + 1)
             list_df.append(df.reset_index())
-        return pd.concat(list_df)
+        return pd.concat(list_df).rename(dataset.feature_cols)
         
     ts_len = None
     for tsid, dataset in enumerate(models):
@@ -394,49 +381,99 @@ def generate_metrics(lstm: LSTM, models: list[Dataset], tcrit: Any) -> tuple[int
         
         list_df_forced.append(run_metrics(tsid, None))
         list_df_null.append(run_metrics(tsid, tcrit))
+        
+    forced, null = pd.concat(list_df_forced), pd.concat(list_df_null)
+        
+    if output is not None:
+        import os.path
+        forced.to_csv(os.path.join(output, f"{name}_ews_roc_forced.csv"), index=False) 
+        null.to_csv(os.path.join(output, f"{name}_ews_roc_null.csv"), index=False)
     
-    return ts_len, pd.concat(list_df_forced), pd.concat(list_df_null)
+    return forced, null
+        
+def load_metric(folder: str, name: str) -> _Metrics | None:
+    forced = os.path.join(folder, f"{name}_ews_roc_forced.csv")
+    null = os.path.join(folder, f"{name}_ews_roc_null.csv")
+    if os.path.exists(forced) and os.path.exists(null):
+        return pd.read_csv(forced, index_col=False), pd.read_csv(null, index_col=False)
+    else:
+        return None
+        
+def load_metrics(folder: str) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:    
+    return list((name, ) + load_metric(folder, name) for name in set(name[:name.index("_ews_roc_")] for name in os.listdir(folder) if "_ews_roc_" in name and name.endswith(".csv")))
 
-def test(lstm: LSTM, models: Iterable[tuple[str, list[Dataset], Any]], output: str | None = None):
-    
-    for name, datasets, tcrit in models:
-        ts_len, forced, null = generate_metrics(lstm, datasets, tcrit)
-        
-        for variable in null["variable"].unique():
-            for type in ["early", "late"]:
-                
-                df_forced = forced[forced["variable"] == variable]
-                df_null = null[null["variable"] == variable]
+def plot_metrics(name: str, forced: pd.DataFrame, null: pd.DataFrame, output: str | None = None):           
+    for variable in forced["variable"].unique():
+        for type in ["early", "late"]:
             
-                rocs, _ = compute_roc(
-                    df_forced,
-                    df_null,
-                    bool_pred_early= type == "early",
-                )
-                
-                fig = plot_roc(
-                    rocs,
-                    name + " " + variable + " " + type,
-                    ts_len
-                )
-                
-                if output:
-                    fig.savefig(os.path.join(output, fig.get_suptitle() + ".png"))
+            df_forced = forced[forced["variable"] == variable]
+            df_null = null[null["variable"] == variable]
         
+            rocs, _ = compute_roc(
+                df_forced,
+                df_null,
+                bool_pred_early = type == "early",
+            )
+            
+            fig = plot_roc(
+                rocs,
+                f"{name} {variable} {type}",
+                len(df_forced)
+            )
+            
+            if output is not None:
+                import os.path
+                fig.savefig(os.path.join(output, fig.get_suptitle() + ".png"))
+
+type _ModelGenerator = dict[str, Callable[[], tuple[list[Dataset], float]]]
+
+def get_or_generate_models(lengths: Sequence[int] = [1500, 500], path: str | None = None):
+    models: list[_Model] = []
+    for name, mfunc in map(lambda mfunc: (mfunc.__name__, functools.partial(mfunc, lengths=lengths)), [may_fold, cr_hopf, cr_trans]):
+        if path is not None:
+            loaded = list(read_test_models(path, name))
+            if len(loaded) != 0:
+                print("Loaded", name)
+                models += loaded
+                continue
+    
+        for datasets, tcrit in mfunc():
+            print("Generating", name)
+            model = (name, datasets, tcrit)
+            models.append(model)
+            if path is not None:
+                save_test_models(path, [model])
+
+    return models
+    
+def load_and_save(metrics_path: str | None, output: str | None, lstm: LSTM | None, models: Iterable[_Model]):
+    for name, datasets, tcrit in models:
+        metric = load_metric(metrics_path, name)
+        if metric is None:
+            if lstm is None:
+                raise ValueError("Please provide an LSTM to generate missing metrics!")
+            print("Generating metrics for", name)
+            metric = generate_metrics(name=name, lstm=lstm, models=datasets, tcrit=tcrit, output=metrics_path)
+        forced, null = metric
+        plot_metrics(name, forced, null, output=output)
         
 if __name__ == "__main__":
     import argparse
-    import os
     parser = argparse.ArgumentParser(
                     prog='LSTM Model Tester',
                     description='Tests trained models against simulated data')
-    parser.add_argument('modelpath', type=str)
     parser.add_argument('output', type=str)
+    parser.add_argument('--lstm', '-l', type=str)
+    parser.add_argument('--simulations', '-s', type=str|bool)
+    parser.add_argument('--metrics', '-i', type=str)
     args = parser.parse_args()
     
-    lstm = LSTMLoader(args.modelpath).with_args(verbose=False)
-    
-    test(lstm, models=generate_test_models(), output=args.output)
-    
-
-        
+    try:
+        load_and_save(
+            metrics_path=args.metrics, 
+            output=args.output, 
+            lstm=LSTMLoader(args.lstm).with_args(verbose=False) if args.lstm is not None else None,
+            models=get_or_generate_models(path=args.simulations),
+        )
+    except ValueError as e:
+        raise ValueError("Please provide either -m for an LSTM model path or -i for an input path of pre-generated metrics!", e)

@@ -61,7 +61,7 @@ class Metrics(Model[pd.DataFrame]):
             for col in EWS_COLS:
                 df["ktau_" + col] = self.ktau(df[col], indices)
             
-        df.insert(0, "variable", series.name)
+        df.insert(0, "variable", [series.name] * len(df))
 
         return df
     
@@ -69,19 +69,6 @@ class Metrics(Model[pd.DataFrame]):
         self: Self,
         dataset: Dataset,
     ):
-                        
-        # def uniform(ages):
-        #     if not self.ac1:
-        #         return False
-        #     distance = ages[1] - ages[0]
-        #     for i in range(2, len(ages)):
-        #         if ages[i] - ages[i - 1] != distance:
-        #             print(f"{dataset.name} is not uniform! Cannot compute autocorrelation.")
-        #             return False
-        #     return True
-        
-        # unif = uniform(dataset.ages())
-            
         self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys()))
         
     def _print(self: Self, dataset: Dataset):

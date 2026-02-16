@@ -70,37 +70,17 @@ class Dataset:
         )
     
     def split(self: Self, features: dict[str, FeatureColumns]) -> list[Self]:
-        return [
-            self.__class__(
-                name=self.name + " " + feat_name,
-                df=self.df[columns],
-                feature_cols=self._convert_feature_cols(columns),
+        
+        def map(name: str, columns: FeatureColumns) -> Self:
+            columns = self._convert_feature_cols(columns)
+            return self.__class__(
+                name=self.name + " " + name,
+                df=self.df[columns.keys()],
+                feature_cols=columns,
                 age_format=self.age_format
-            ) for feat_name, columns in features.items()
-        ]
+            )
         
-    def normalize(self: Self):
-        df = self.df.copy()
-        
-        for col in self.features_cols.keys():
-            arr: np.ndarray = df[col].to_numpy()
-            div = np.mean(np.abs(arr))
-            df[col] = arr / div
-        
-        return self.__class__(
-            name=self.name,
-            df=df,
-            feature_cols = self.feature_cols.copy(),
-            age_format = self.age_format,
-        )
-        
-    def null(self: Self, index: Any):
-        return self.__class__(
-            name=self.name,
-            df=self.df[self.df.index < index],
-            feature_cols=self.feature_cols,
-            age_format=self.age_format,
-        )
+        return [map(feat_name, column) for feat_name, column in features.items()]
            
     # Clean up data frame before transforming
     @staticmethod
@@ -137,8 +117,6 @@ class Dataset:
 
         if df_sel.empty:
             raise ValueError("No rows with usable feature values after imputation. Check your data and feature selection.")
-        
-        print(df_sel)
 
         return df_sel.set_index(age_col)
     
@@ -174,24 +152,25 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
         pass
     
     def run_with_output(self, datasets: Iterable[Dataset], print: bool = True, plot: bool = True, plot_path: str | None = None):
+        from builtins import print as println
         
-        print(f"###### Running {self.name} on datasets:")
+        println(f"###### Running {self.name} on datasets:")
         for dataset in datasets:
             try:
-                print(f"### Running {dataset.name}...")
+                println(f"### Running {dataset.name}...")
                 start = time.time()
                 self.run(dataset)
-                print(f"### {self.name} completed in {time.strftime("%Hh%Mm%Ss", time.gmtime(time.time() - start))}")
-                print()
+                println(f"### {self.name} completed in {time.strftime("%Hh%Mm%Ss", time.gmtime(time.time() - start))}")
+                println()
         
                 if print:
-                    print(f"###### {self.name} results for {dataset.name}:")
+                    println(f"###### {self.name} results for {dataset.name}:")
                     try:
                         self._print(dataset)            
                     except Exception:
-                        print(f"###### {self.name} results for {dataset.name} failed with exception:")
+                        println(f"###### {self.name} results for {dataset.name} failed with exception:")
                         traceback.print_exc()
-                    print()
+                    println()
                 
                 if plot:
                     try:
@@ -204,4 +183,4 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
             except Exception:
                 traceback.print_exc()
             
-        print()
+        println()

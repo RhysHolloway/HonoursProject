@@ -727,20 +727,13 @@ def multibatch(
             path=path,
         )
     
-def run_with_args():
-    
-    import argparse
-    parser = argparse.ArgumentParser(
-                    prog='LSTM Training Data Generator',
-                    description='Generates training data')
-    parser.add_argument('output', type=str)
-    parser.add_argument('-b', '--batches', type=int, default=1)
-    parser.add_argument('-s', '--batch-start', type=int, default=1)
-    parser.add_argument('-l', '--length', type=int)
-    parser.add_argument('-m', '--bifurcations', type=int, default=1000)
-    args = parser.parse_args()
-    
-    batches = list(range(args.batch_start, args.batch_start + args.batches))
+_DEFAULT_BIF_MAX = 1000
+def run_with_args(
+    ts_len: int,
+    batches: Sequence[int],
+    bif_max: int = _DEFAULT_BIF_MAX,
+    output: str | None = None
+):
     
     import sys
     import threading
@@ -768,13 +761,25 @@ def run_with_args():
     import atexit
     atexit.register(lambda: pool.shutdown(wait=False, cancel_futures=True))
 
-    multibatch(
+    return multibatch(
         batch_pool=pool, 
         batches=batches, 
-        ts_len=args.length, 
-        bif_max=args.bifurcations,
-        path=args.output,
+        ts_len=ts_len, 
+        bif_max=bif_max,
+        path=output,
     )
     
 if __name__ == "__main__":
-    run_with_args()
+        
+    import argparse
+    parser = argparse.ArgumentParser(
+                    prog='LSTM Training Data Generator',
+                    description='Generates training data')
+    parser.add_argument('output', type=str)
+    parser.add_argument('-b', '--batches', type=int, default=1)
+    parser.add_argument('-s', '--batch-start', type=int, default=1)
+    parser.add_argument('-l', '--length', type=int)
+    parser.add_argument('-m', '--bifurcations', type=int, default=_DEFAULT_BIF_MAX)
+    args = parser.parse_args()
+    
+    run_with_args(ts_len=args.length, batches=list(range(args.batch_start, args.batch_start + args.batches)), bif_max=args.bifurcations, output=args.output)

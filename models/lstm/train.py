@@ -31,59 +31,24 @@ from keras.losses import SparseCategoricalCrossentropy
 
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score, classification_report
 
-def _read_batch(dir) -> tuple[TrainData, int]:
-    print(f"Reading {dir}...")
-    groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
-    
-    if len(groups) == 0:
-        raise RuntimeError("Empty labels file!")
-
-    sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['x'] for seq_id in groups.index.values}
-    
-    ts_len = len(next(iter(sims.values())))
-    
-    print("Read", dir)
-    
-    return (sims, pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL), groups), ts_len
-
-def _read_input_folder(input: str) -> tuple[Sims, pd.DataFrame, int]:
-    try:
-        entries = os.listdir(input)
-        if "groups.csv" in entries:
-            batches, ts_len = _read_batch(input)
-        else:
-            batches = [entry for entry in entries if os.path.exists(os.path.join(input, entry, "groups.csv"))]
-            if len(batches) == 0:
-                raise RuntimeError(f"Input folder {input} contains no batches in entries: {entries}")
-            batches = [_read_batch(os.path.join(input, entry)) for entry in entries] 
-            ts_len = batches[0][-1]
-            if not all(ts_len == other_len for _, other_len in batches):
-                raise RuntimeError(f"Input series lengths are different! {list(other_len for _, other_len in batches)}")
-            batches = combine_batches(b[0] for b in batches)
-            
-    except Exception as e:
-        raise RuntimeError("Could not read input folder with error:", e) 
-    
-    sims, df_labels, df_groups = batches
-    return sims, pd.merge(df_groups, df_labels, left_index=True, right_index=True), ts_len
-
+_DEFAULT_EPOCHS = 500
+_DEFAULT_PATIENCE = 50
 def train(
-    input: str,
+    data: TrainData,
     type: Literal["lpad", "lrpad"],
     name: str = "best_model",
     output: Union[str, None] = None,
-    epochs: int = 500,
-    patience: int = 50,
+    epochs: int = _DEFAULT_EPOCHS,
+    patience: int = _DEFAULT_PATIENCE,
     batch_size: int = 32,
     filters: int = 50,
     kernel_size: int = 12,
     kernel_initializer: str = 'lecun_normal',
     optimizer: Optimizer = Adam(learning_rate = 0.0005),
 ) -> Sequential:
-    
-    output = input if output is None else output
-    
-    sims, labels, ts_len = _read_input_folder(input)
+    sims, df_labels, df_groups = data
+    labels = pd.merge(df_groups, df_labels, left_index=True, right_index=True)
+    ts_len = len(next(iter(sims.values())))
         
     match type:
         case "lrpad":
@@ -94,11 +59,8 @@ def train(
             pad_right = 0
         case _:
             raise ValueError("Please provide valid type as input: lrpad, lpad")
-        
-    def filename(object: str, ext: str):
-        return f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.{ext}"
     
-    model_name = filename(name, "keras")
+    model_name = f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.keras"
     
     print("Computing training data from simulations...")
 
@@ -224,24 +186,70 @@ def train(
 #############################################
 
 if __name__ == "__main__":
+    
+    def _read_batch(dir) -> TrainData:
+        print(f"Reading {dir}...")
+        groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
+        
+        if len(groups) == 0:
+            raise RuntimeError("Empty labels file!")
+
+        sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['x'] for seq_id in groups.index.values}
+        labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL)
+        print("Read", dir)
+        return sims, labels, groups
+    
     import argparse
     parser = argparse.ArgumentParser(
                     prog='LSTM Model Trainer',
                     description='Trains models on generated data')
     parser.add_argument('input', type=str, help="Path to a folder containing batches or a generated batch")
-    parser.add_argument('--type', '-t', type=str, help="Type of zero-padding to use training the model", default="lrpad")
+    parser.add_argument('--train', '-t', type=int, nargs=2, help="Generate the set of training data before training the model.")
+    parser.add_argument('--pad', '-p', type=str, help="Type of zero-padding to use training the model", default="lrpad")
     parser.add_argument('--name', '-n', type=str, help="Model file name", default="best_model")
     parser.add_argument('--output', '-o', type=str, help="Folder path to output models. If not provided, defaults to placing model beside training data.")
-    parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for")
-    parser.add_argument('--patience', '-p', type=int, help="Cancel training after a given number of epochs if the model does not improve since then")
+    parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for", default=_DEFAULT_EPOCHS)
+    parser.add_argument('--patience', '-p', type=int, help="Cancel training after a given number of epochs if the model does not improve since then", default=_DEFAULT_PATIENCE)
     
     args = parser.parse_args()
     
+    output = args.input if args.output is None else args.output
+    
+    if args.train is not None:
+        print("Reading/Generating training data in", args.input)
+        train_args = tuple(args.train)
+        if len(train_args) not in [2, 3]:
+            raise ValueError("Please provide the time series length (ex. 1500) AND the number of batches (ex. 10) OR an inclusive range of batches (ex. 1 10) and with --train! (ex. --train 1500 1 10 OR --train 1500 10)")
+        import models.lstm.generate as generate
+        data = generate.run_with_args(
+            ts_len=train_args[0], 
+            batches=list(range(train_args[1] if len(train_args) == 3 else 1, train_args[-1] + 1)),
+            output=args.input
+        )
+    else:
+        input = args.input
+        try:
+            entries = os.listdir(input)
+            if "groups.csv" in entries:
+                batches = _read_batch(input)
+            else:
+                batches = [entry for entry in entries if os.path.exists(os.path.join(input, entry, "groups.csv"))]
+                if len(batches) == 0:
+                    raise RuntimeError(f"Input folder {input} contains no batches in entries: {entries}")
+                batches = [_read_batch(os.path.join(input, entry)) for entry in entries] 
+                ts_len = len(next(iter(batches[0][0].values())))
+                if not all(ts_len == len(next(iter(b[0].values()))) for b in batches):
+                    raise RuntimeError(f"Input series lengths are different! {list(other_len for _, other_len in batches)}")
+                data = combine_batches(batches)
+                
+        except Exception as e:
+            raise RuntimeError("Could not read input folder with error:", e) 
+    
     train(
-        input=args.input, 
+        data=data, 
         type=args.type,  
         name=args.name,
-        output=args.output,
+        output=output,
         epochs=args.epochs,
         patience=args.patience,
     )

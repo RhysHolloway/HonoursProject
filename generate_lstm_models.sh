@@ -15,17 +15,15 @@ source $DIR/env.sh
 
 for len in 500 1500 ;
 do
-    echo Generating training data of length $len...
-    python -m models.lstm.generate env/training/len$len/ -b $BATCHES -l $len
-    echo Training $((2*$BATCHES)) models of length $len...
-    for n in $(seq 1 $BATCHES);
+    echo Training 20 models of length $len on $((4000*$BATCHES)) time series...
+    for n in $(seq 1 10);
     do
-        for type in lrpad lpad ;
+        for pad in lrpad lpad ;
         do
-            python -m models.lstm.train env/training/len$len/ -o output/models/lstm/len$len/ -n best_model_$n --type $type
+            python -m models.lstm.train env/training/len$len/ -o output/models/lstm/len$len/ -n best_model_$n --pad $pad --train $len $BATCHES
         done
     done
 done
 
+cd $OLD_DIR
 echo Finished!
-on_exit()
