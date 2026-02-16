@@ -10,7 +10,7 @@ Made to run using only one file, multithreaded, and without AUTO-07p
 @author: Rhys Holloway, Thomas Bury
 
 """
-
+from sys import stderr
 import abc
 import builtins
 import copy
@@ -21,15 +21,115 @@ import numpy as np
 import ruptures
 from typing import Any, Callable, Final, Self, Sequence, Union
 import pandas as pd
-from statsmodels.nonparametric.smoothers_lowess import lowess
 import concurrent.futures
-from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from concurrent.futures import Executor, ThreadPoolExecutor
 import scipy.optimize._nonlin as nl
 import scipy.integrate
 import pycont
 import warnings
 
 from ..lstm import *
+
+class Counts(metaclass = abc.ABCMeta):
+    
+    def attr(type: BifType) -> str:
+        match type:
+            case ("HB", True):
+                return "null_h_count"
+            case ("LP", True):
+                return "null_f_count"
+            case ("BP", True):
+                return "null_b_count"
+            case ("HB", False):
+                return "hopf_count"
+            case ("LP", False):
+                return "fold_count"
+            case ("BP", False):
+                return "branch_count"
+    
+    def __init__(self: Self, initializer: Callable[[BifType], Any]):
+        for type in bif_types():
+            setattr(self, Counts.attr(type), initializer(type))
+    
+    @abc.abstractmethod
+    def count(self: Self, type: BifType) -> int:
+        pass
+    
+    @abc.abstractmethod
+    def inc(self: Self, type: BifType):
+        pass
+    
+    def null_count(self: Self) -> int:
+        return sum(self.count((bif, True)) for bif in BIFS)
+        
+    def bif_count(self: Self) -> int:
+        return sum(self.count((bif, False)) for bif in BIFS)
+    
+    def total(self: Self) -> int:
+        return self.bif_count() + self.null_count()
+    
+    def __lt__(self: Self, bif_max: int) -> bool:
+        return any(self.count(type) < bif_maximum(type, bif_max) for type in bif_types())
+    
+    def __str__(self: Self) -> str:
+        return ", ".join((("Null " if null else "") + type + ": " + str(self.count((type, null)))) for type, null in bif_types())
+
+def _init_atomic(_: BifType) -> AtomicUint:
+    counter: AtomicUint = atomics.atomic(width=4, atype=atomics.UINT)
+    counter.store(0)
+    return counter
+
+class _AtomicCounts(Counts):
+    
+    def __init__(self):
+        super().__init__(_init_atomic)
+    
+    def _get(self, type: BifType) -> AtomicUint:
+        return getattr(self, Counts.attr(type))
+    
+    def count(self, type: BifType) -> int:
+        return self._get(type).load()
+    
+    def inc(self, type: BifType):
+        self._get(type).inc()
+
+class BifCounts(Counts):
+    
+    def __init__(self: Self, counts: Union[_AtomicCounts, None] = None):
+        super().__init__(lambda type: 0 if counts is None else counts.count(type))
+            
+    def count(self: Self, type: BifType) -> int:
+        return getattr(self, Counts.attr(type))
+    
+    def copy(self: Self) -> Self:
+        return copy.copy(self)
+        
+    def __iadd__(self: Self, other: Counts):
+        for type in bif_types():
+            attr = Counts.attr(type)
+            setattr(self, attr, getattr(self, attr) + other.count(type))
+
+    def __add__(self: Self, other: Self) -> Self:
+        new = self.copy()
+        new += other
+        return new
+    
+    def inc(self, type: BifType):
+        attr = Counts.attr(type)
+        setattr(self, attr, getattr(self, attr) + 1)
+
+SOLVER_PARAMETERS: Final[dict] = {
+    "tolerance": 1e-8,
+    "hopf_detection": True,
+    "param_min": -5.0,
+    "param_max": 5.0,
+}
+
+type _Simulation = tuple[Sims, BifType]
+type _Simulations = dict[int, _Simulation]
+
+type _ModelOutput = list[_Simulation]
+
 
 def _generate_simulation(
     # Define convergence threshold
@@ -147,113 +247,12 @@ def _generate_simulation(
 
     return (pars, equi, rrate)
 
-class _Counts(metaclass = abc.ABCMeta):
-    
-    def attr(type: BifType) -> str:
-        match type:
-            case ("HB", True):
-                return "null_h_count"
-            case ("LP", True):
-                return "null_f_count"
-            case ("BP", True):
-                return "null_b_count"
-            case ("HB", False):
-                return "hopf_count"
-            case ("LP", False):
-                return "fold_count"
-            case ("BP", False):
-                return "branch_count"
-    
-    def __init__(self: Self, initializer: Callable[[BifType], Any]):
-        for type in bif_types():
-            setattr(self, _Counts.attr(type), initializer(type))
-    
-    @abc.abstractmethod
-    def count(self: Self, type: BifType) -> int:
-        pass
-    
-    @abc.abstractmethod
-    def inc(self: Self, type: BifType):
-        pass
-    
-    def null_count(self: Self) -> int:
-        return sum(self.count((bif, True)) for bif in BIFS)
-        
-    def bif_count(self: Self) -> int:
-        return sum(self.count((bif, False)) for bif in BIFS)
-    
-    def total(self: Self) -> int:
-        return self.bif_count() + self.null_count()
-    
-    def __lt__(self: Self, bif_max: int) -> bool:
-        return any(self.count(type) < bif_maximum(type, bif_max) for type in bif_types())
-    
-    def __str__(self: Self) -> str:
-        return ", ".join((("Null " if null else "") + type + ": " + str(self.count((type, null)))) for type, null in bif_types())
-
-def _init_atomic(_: BifType) -> AtomicUint:
-    counter: AtomicUint = atomics.atomic(width=4, atype=atomics.UINT)
-    counter.store(0)
-    return counter
-
-class _AtomicCounts(_Counts):
-    
-    def __init__(self):
-        super().__init__(_init_atomic)
-    
-    def _get(self, type: BifType) -> AtomicUint:
-        return getattr(self, _Counts.attr(type))
-    
-    def count(self, type: BifType) -> int:
-        return self._get(type).load()
-    
-    def inc(self, type: BifType):
-        self._get(type).inc()
-
-class BifCounts(_Counts):
-    
-    def __init__(self: Self, counts: Union[_AtomicCounts, None] = None):
-        super().__init__(lambda type: 0 if counts is None else counts.count(type))
-            
-    def count(self: Self, type: BifType) -> int:
-        return getattr(self, _Counts.attr(type))
-    
-    def copy(self: Self) -> Self:
-        return copy.copy(self)
-        
-    def __iadd__(self: Self, other: _Counts):
-        for type in bif_types():
-            attr = _Counts.attr(type)
-            setattr(self, attr, getattr(self, attr) + other.count(type))
-
-    def __add__(self: Self, other: Self) -> Self:
-        new = self.copy()
-        new += other
-        return new
-    
-    def inc(self, type: BifType):
-        attr = _Counts.attr(type)
-        setattr(self, attr, getattr(self, attr) + 1)
-
-SOLVER_PARAMETERS: Final[dict] = {
-    "tolerance": 1e-8,
-    "hopf_detection": True,
-    "param_min": -5.0,
-    "param_max": 5.0,
-}
-
-type _Simulation = tuple[Sims, BifType]
-type _Simulations = dict[int, _Simulation]
-
-type _ModelOutput = list[_Simulation]
 def _gen_model(
-        ts_len: int,
-        bif_max: int,
-        total_counts: _AtomicCounts,
-        pool: Executor,
-        simulations: _ModelOutput = [],
-) -> _ModelOutput:
-    
+    ts_len: int,
+    bif_max: int,
+    total_counts: _AtomicCounts,
+    pool: Executor,
+):
     
     with warnings.catch_warnings(action="ignore", category=scipy.integrate.ODEintWarning):
         pars, equi, rrate = _generate_simulation()
@@ -275,42 +274,37 @@ def _gen_model(
         ) for par in range(len(pars)) if pars[par] != 0.0
     ]
 
-    def retry():
-        for task in tasks:
-            task.cancel()
-        return _gen_model(ts_len, bif_max, total_counts=total_counts, pool=pool, simulations=simulations) 
-
     for task in concurrent.futures.as_completed(tasks):
         e = task.exception()
         r = e if e is not None else task.result()
+        tasks.remove(task)
         match r:
             case list(new_sims):
-                simulations += new_sims
+                yield new_sims
             case _:
                 match type(r):
                     case builtins.ValueError:
                         if "Jacobian inversion yielded zero vector." in str(r):
-                            return retry()
-                    case nl.NoConvergence | builtins.RecursionError:
-                        return retry()
+                            break
+                        else:
+                            traceback.print_exception(r, file=stderr)       
+                    case nl.NoConvergence:
+                        break
                     case concurrent.futures.CancelledError | builtins.UnboundLocalError:
                         pass
                     case _:
-                        traceback.print_exception(r)
+                        traceback.print_exception(r, file=stderr)
     
     for task in tasks:
         task.cancel()
-
-    return simulations
 
 def _gen_branches_py(
         par: int,
         pars: np.ndarray[np.float64],
         equi: np.ndarray[np.float64],
         steps: int = 500,
-    ) -> list[dict]:
+    ) -> list[tuple[BifId, float]]:
     pars = pars.copy()
-    initial = pars[par]
     
     def G(u: np.ndarray[np.float64], p: np.float64):
         pars[par] = p
@@ -327,19 +321,40 @@ def _gen_branches_py(
        
     with np.errstate(invalid='ignore'):
         cont = pycont.arclengthContinuation(
-            G=G, u0=equi, p0=initial,
+            G=G, u0=equi, p0=pars[par],
             ds_0=1e-02, ds_min=1e-03, ds_max=1e-01,
             n_steps=steps,
             solver_parameters=SOLVER_PARAMETERS,
             verbosity=pycont.Verbosity.OFF,
         )
 
-    return [{
-        'type': branch.termination_event.kind,
-        'value': branch.termination_event.p, 
-        'branch_vals':branch.termination_event.u,
-        'initial_param':initial,
-    } for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in BIFS]      
+    return [(branch.termination_event.kind, branch.termination_event.p) for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in BIFS]      
+
+def _sim_func(pars: np.ndarray[np.float64], par: int):
+    pars = pars.copy()
+    def de_fun(s: np.ndarray[np.float64], value: float) -> np.ndarray[np.float64]:
+            pars[par] = value
+            '''
+            Input:
+            s is state vector
+            pars is dictionary of parameter values
+            
+            Output:
+            array [dxdt, dydt]
+            
+            '''
+            
+            # Polynomial forms up to third order
+            x: np.float64=s[0]
+            y: np.float64=s[1]
+            polys: np.ndarray[np.float64] = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
+
+            dxdt: np.float64 = np.dot(pars[10:], polys)
+            dydt: np.float64 = np.dot(pars[:10], polys)
+                        
+            return np.array([dxdt, dydt])
+        
+    return de_fun
 
 def _simulate(
         par: int,
@@ -363,10 +378,7 @@ def _simulate(
     Detect transition point using change-point algorithm
     Ouptut time-series of ts_len time units prior to transition
 
-    """   
-     
-    branches = _gen_branches_py(par, pars, equi)
-    pars = pars.copy()
+    """
 
     # Noise amplitude
     sigma_tilde = 0.01
@@ -388,137 +400,71 @@ def _simulate(
     # to increase the chance that we can extract ts_len data points prior to a transition
     # (transition can occur before the bifurcation is reached)
     series_len = ts_len + 200
-    
-    def de_fun(s: np.ndarray[np.float64], b: float) -> np.ndarray[np.float64]:
-            pars[par] = b
-            '''
-            Input:
-            s is state vector
-            pars is dictionary of parameter values
+        
+    for type, value in _gen_branches_py(par, pars, equi):
+        for null in [False, True]:    
             
-            Output:
-            array [dxdt, dydt]
-            
-            '''
-            
-            # Polynomial forms up to third order
-            x: np.float64=s[0]
-            y: np.float64=s[1]
-            polys: np.ndarray[np.float64] = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
-
-            dxdt: np.float64 = np.dot(pars[10:], polys)
-            dydt: np.float64 = np.dot(pars[:10], polys)
-                        
-            return np.array([dxdt, dydt])
-    
-    # Pick sample spacing randomly from [0.1,0.2,...,1]
-    dt_sample = np.random.choice(np.arange(1,11)/10)
-        
-    for null in [False, True]:
-        
-        binit=model["initial_value"]
-        bcrit=model['value']
-        
-        null_location=0.0 if null else None
-        
-        # If a null simulation, simulate at a fixed value of b, given by b_null
-        if null_location is not None:
-            assert 0.0 <= null_location and null_location <= 1.0
-            # Set binit and bcrit for simulation as equal to b_null
-            binit += null_location*(bcrit-binit)
-            bcrit = binit
-        
-        simulator = StochSim(
-            binit=binit, 
-            bcrit=bcrit, 
-            ts_len=series_len,
-            dt_sample=dt_sample,
-        )
-        
-        for model in branches:
-            
-            bif_type: BifType = (model['type'], null)
+            bif_type: BifType = (type, null)
             
             if (
                 total_counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max) and
                 (model_counts.null_count() if null else model_counts.count(bif_type)) == 0 # Has this model not ran this (or another null sim if null) simulation yet
             ):
-                df_out = simulator.simulate(
-                    de_fun=de_fun,
-                    s0=equi, 
-                    sigma=sigma, 
+                binit=pars[par]
+                bcrit=value
+                
+                null_location=0.0 if null else None
+                
+                # If a null simulation, simulate at a fixed value of b, given by b_null
+                if null_location is not None:
+                    assert 0.0 <= null_location and null_location <= 1.0
+                    # Set binit and bcrit for simulation as equal to b_null
+                    binit += null_location*(bcrit-binit)
+                    bcrit = binit
+                
+                # Pick sample spacing randomly from [0.1,0.2,...,1]
+                dt_sample = np.random.choice(np.arange(1,11)/10)
+                
+                simulator = StochSim(
+                    binit=binit, 
+                    bcrit=bcrit, 
+                    ts_len=series_len,
+                    dt_sample=dt_sample,
                 )
                 
-                if df_out is None:
+                sim = simulator.simulate(
+                    de_fun=_sim_func(pars, par),
+                    s0=equi, 
+                    sigma=sigma,
+                )['p0']
+                
+                t_nan = sim.last_valid_index()
+                if t_nan is None or t_nan < ts_len:
                     continue
                 
-                trans_time = _trans_detect(df_out)
-                        
-                if trans_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).cmpxchg_strong(0, 1).success:
-                    df_cut = df_out.loc[trans_time-ts_len:trans_time-1].reset_index()
+                # Detect a jump to another state (in time-series prior to infinity jump)
+                # Break points - higher penalty means less likely to detect jumps, get first jump
+                t_jump = ruptures.Window(width=10, model="l2", jump=1, min_size=2).fit(
+                    compute_residuals(sim.loc[:t_nan], span = 0.2).to_numpy().T
+                ).predict(pen=1, n_bkps=1)[0] - 1
+                
+                # Output minimum of tnan or tjump
+                transit_time = min(t_nan,t_jump)
+                
+                if transit_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).cmpxchg_strong(0, 1).success:
+                    sim = sim.iloc[-ts_len:]
                     # Have time-series start at time t=0
-                    df_cut["time"] = df_cut["time"]-df_cut["time"][0]
-                    df_cut.set_index("time", inplace=True)
+                    sim.index -= sim.index[0]
                     sims.append((
                         # Simulations
-                        df_cut['x'],
+                        sim,
                         # Label
                         bif_type,
                     ))
-                    break
+                    continue
     
+                
     return sims
-    
-# Function to detect change points
-def _trans_detect(df_in: pd.DataFrame):
-    '''
-    Function to detect a change point in a time series
-    Input:
-        df_in: DataFrame indexed by time, with series data in column 'x'
-    Output:
-        float: time at which transition occurs
-    '''
-    # Check for a jump to Nan
-    df_nan: pd.DataFrame = df_in[np.isnan(df_in['x'])]
-    if df_nan.size == 0:
-        # Assign a big value to t_nan
-        t_nan = 1e6
-    else:
-        # First time of Nan
-        t_nan = df_nan.iloc[0].name
-    
-    
-    if t_nan > 500:        
-        # Detect a jump to another state (in time-series prior to infinity jump)
-        
-        # First detrend the series (breakpoint detection is not working well with non-stationary data)
-        span = 0.2
-        series_data: pd.Series = df_in.loc[:t_nan-1]['x']
-        smooth_data = lowess(series_data.values, series_data.index.values, frac=span)[:,1]
-        # On rare occasion the smoothing function messes up
-        # In this case output 0, and run new simulation
-        if len(series_data.values) != len(smooth_data):
-            return 0
-        
-        # Compute residuals
-        residuals = series_data.values[:len(smooth_data)] - smooth_data
-        resid_series = pd.Series(residuals, index=series_data.index)
-    
-        
-        array_traj = resid_series.values.transpose()
-        # Window-based change point detection
-        algo = ruptures.Window(width=10, model="l2", jump=1, min_size=2).fit(array_traj)
-        # Break points - higher penalty means less likely to detect jumps
-        bps = algo.predict(pen=1)
-        
-        t_jump = bps[0]
-    else:
-        # Assign big value to t_jump
-        t_jump = 1e6
-    
-    # Output minimum of tnan or tjump
-    out = min(max(0,t_nan-1),t_jump-1)
-    return out
 
 def _create_groups(
     df_labels: pd.DataFrame,
@@ -578,45 +524,6 @@ def batch(
     path: Union[None, str] = None,
     ) -> TrainData:
     
-    def generator():
-        pool = ThreadPoolExecutor()
-        if pool._max_workers // 10 > 0:
-            tasks: list[Future[_ModelOutput]] = []
-            while counts < bif_max:
-                while len(tasks) < pool._max_workers // 10:
-                    tasks.append(
-                        pool.submit(
-                            _gen_model,
-                            ts_len=ts_len,
-                            bif_max=bif_max,
-                            total_counts=counts,
-                            pool=pool,
-                        )
-                    )
-                concurrent.futures.wait(tasks, return_when=concurrent.futures.FIRST_COMPLETED)
-                for task in tasks:
-                    if task.done():
-                        match task.exception():
-                            case None:
-                                tasks.remove(task)
-                                yield task.result()
-                            case e:
-                                match type(e):
-                                    case concurrent.futures.CancelledError:
-                                        pass
-                                    case _:
-                                        traceback.print_exception(e)
-            for task in tasks:
-                task.cancel()
-        else:
-            while counts < bif_max:
-                yield _gen_model(
-                        ts_len=ts_len,
-                        bif_max=bif_max,
-                        total_counts=counts,
-                        pool=pool,
-                    )
-    
     print("Batch", batch_num, "start")
     
     simulations: _Simulations = dict()
@@ -639,15 +546,14 @@ def batch(
             for seq_id, bif, null in labels[['bif', 'null']].itertuples(index=True, name=None):
                 biftype: BifType = (bif, null)
                 if counts.count(biftype) < bif_maximum(biftype, bif_max):
-                    simulations[seq_id] = (
-                        pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv")),
-                        (bif, null)
-                    )
+                    
+                    sim = pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv"))
+                    
+                    if len(sim) != ts_len:
+                        raise RuntimeError(f"Batch {batch_num} loaded simulation {seq_id} with non-matching length {len(sim)}! (expected {ts_len})")
+                    
+                    simulations[seq_id] = (sim, (bif, null))
                     counts.inc(biftype)
-                
-            if len(simulations) > 0:
-                # ts_len is same between previous iterations and now
-                assert len(next(iter(simulations.values()))[0]) == ts_len
                           
             label_file = open(labels_path, "a+")
                 
@@ -658,18 +564,27 @@ def batch(
     
     current = max(simulations.keys()) + 1 if len(simulations) != 0 else 1
     
-    for results in generator():
+    pool = ThreadPoolExecutor()
+    
+    while counts < bif_max:
         added = set()
-        for result in results:
-            biftype = result[1]
-            if counts.count(biftype) < bif_maximum(type=biftype, bif_max=bif_max) and not (any((t, True) in added for t in BIFS) if type[1] else type in added):
-                simulations[current] = result
-                counts.inc(biftype)
-                added.add(biftype)
-                if label_file is not None:
-                    result[0].to_csv(os.path.join(path, f"sims/tseries{current}.csv"))
-                    label_file.write(f"{current},{_num_from_label(biftype)},{biftype[0]},{biftype[1]}\n")
-                current += 1
+        
+        for results in _gen_model(
+            ts_len=ts_len,
+            bif_max=bif_max,
+            total_counts=counts,
+            pool=pool,
+        ):
+            for result in results:
+                biftype = result[1]
+                if counts.count(biftype) < bif_maximum(type=biftype, bif_max=bif_max) and not (any((t, True) in added for t in BIFS) if type[1] else type in added):
+                    simulations[current] = result
+                    counts.inc(biftype)
+                    added.add(biftype)
+                    if label_file is not None:
+                        result[0].to_csv(os.path.join(path, f"sims/tseries{current}.csv"))
+                        label_file.write(f"{current},{_num_from_label(biftype)},{biftype[0]},{biftype[1]}\n")
+                    current += 1
 
         if len(added) != 0:
             print("Batch", batch_num, "-", counts)

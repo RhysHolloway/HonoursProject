@@ -266,8 +266,8 @@ def combine_batches(batches: Iterable[TrainData]) -> TrainData:
     
     return reduce(_reduce_combine, batches)
 
-def compute_residuals(data: pd.Series) -> pd.Series:
-        smooth_data = lowess(data.values, data.index.values, frac=0.2)[:, 1]
+def compute_residuals(data: pd.Series, span: float = 0.2) -> pd.Series:
+        smooth_data = lowess(data.values, data.index.values, frac=span)[:, 1]
         return pd.Series(data.values - smooth_data, index=data.index, name="Residuals")
     
 type XY = np.ndarray[np.dtype[float]]
@@ -318,6 +318,7 @@ class StochSim():
         
         # Set up bifurcation parameter b, that increases linearly in time from binit to bcrit
         self.parameter = pd.Series(np.linspace(binit,bcrit,len(t)),index=t)
+        self.parameter.index.name = "time"
         
         self.dt = dt
         self.dt_sample = dt_sample
@@ -353,29 +354,25 @@ class StochSim():
         """
         
         ## Implement Euler Maryuyama for stocahstic simulation
-        s: np.ndarray[np.ndarray[float]] = np.zeros([len(self.parameter),len(s0)])
+        s: np.ndarray[np.ndarray[float]] = np.empty([len(self.parameter),len(s0)])
+        s[:] = np.nan
         
         # Create brownian increments (s.d. sqrt(dt))
         dW_burn = rand.normal(loc=0, scale=np.sqrt(self.dt) * sigma, size = [int(tburn/self.dt),len(s0)])
         dW = rand.normal(loc=0, scale=np.sqrt(self.dt) * sigma, size = [len(self.parameter/self.dt),len(s0)])
         
         # Run burn-in period on s0
-        for i in range(int(tburn/self.dt)):
-            s0 = s0 + de_fun(s0, self.parameter.iloc[0]) * self.dt + dW_burn[i]
-            
-        # Initial condition post burn-in period
-        s[0] = s0
-        
-        # Run simulation
-        for i in range(len(self.parameter)-1):
-            # Update bifurcation parameter
-            s[i+1] = clip(s[i] + de_fun(s[i], self.parameter.iloc[i])*self.dt + dW[i])
+        with np.errstate(invalid="raise", over="raise"):
+            try:
+                # Get initial condition post burn-in period
+                for i in range(int(tburn/self.dt)):
+                    s0 = s0 + de_fun(s0, self.parameter.iloc[0]) * self.dt + dW_burn[i]
+                s[0] = s0
                 
-        # Store series data in a DataFrame
-        df_traj = pd.DataFrame({"time": self.parameter.index} | {f"p{i}":s[:,i] for i in range(s.shape[1])})#, 'b': self.parameter.to_numpy()})
-        
-        # Filter dataframe according to spacing
-        df_traj_filt = df_traj.iloc[0::int(self.dt_sample/self.dt)].set_index("time")
-        df_traj_filt.index = df_traj_filt.index.astype(int)
-
-        return df_traj_filt
+                # Run simulation, updating bifurcation parameter
+                for i in range(len(self.parameter)-1):
+                    s[i+1] = clip(s[i] + de_fun(s[i], self.parameter.iloc[i])*self.dt + dW[i])
+            finally:
+                df = pd.DataFrame(s, columns=[f"p{i}" for i in range(s.shape[1])], index=self.parameter.index).iloc[0::int(self.dt_sample/self.dt)]
+                df.index = df.index.astype(int)
+                return df
