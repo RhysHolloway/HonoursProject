@@ -9,18 +9,18 @@ Modified model training script for the tipping point-detecting deep learning mod
 
 """
 
-from concurrent.futures import ThreadPoolExecutor
 import os
 import os.path
 import random
 from typing import Final, Literal, Union
 import numpy as np
 import pandas as pd
+
 import atomics
+from concurrent.futures import ThreadPoolExecutor
 
 from ..lstm import INDEX_COL, Sims, TrainData, combine_batches, compute_residuals
 
-import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 from keras.models import Sequential  # type: ignore
@@ -67,13 +67,13 @@ def _read_input_folder(input: str) -> tuple[Sims, pd.DataFrame, int]:
     sims, df_labels, df_groups = batches
     return sims, pd.merge(df_groups, df_labels, left_index=True, right_index=True), ts_len
 
-def train_lstm_from_batches(
+def train(
     input: str,
-    output: Union[str, None],
     type: Literal["lpad", "lrpad"],
-    epochs: int,
     name: str = "best_model",
-    patience: int = 30,
+    output: Union[str, None] = None,
+    epochs: int = 500,
+    patience: int = 50,
     batch_size: int = 32,
     filters: int = 50,
     kernel_size: int = 12,
@@ -94,7 +94,11 @@ def train_lstm_from_batches(
             pad_right = 0
         case _:
             raise ValueError("Please provide valid type as input: lrpad, lpad")
+        
+    def filename(object: str, ext: str):
+        return f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.{ext}"
     
+    model_name = filename(name, "keras")
     
     print("Computing training data from simulations...")
 
@@ -155,16 +159,11 @@ def train_lstm_from_batches(
     model.compile(
         loss=SparseCategoricalCrossentropy(), 
         optimizer=optimizer, 
-        metrics=['accuracy']
+        metrics=['accuracy', 'sparse_categorical_accuracy']
     )
     
     print("Fitting model...")
     
-
-    def format_name(object: str, ext: str):
-        return f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.{ext}"
-    
-    model_name = format_name(name, "keras")
     MONITOR: Final[str] = "val_accuracy"
     
     history = model.fit(
@@ -173,8 +172,8 @@ def train_lstm_from_batches(
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[
+            ModelCheckpoint(model_name, monitor=MONITOR, save_best_only=True, mode="max", verbose=1),
             EarlyStopping(monitor=MONITOR, patience=patience, restore_best_weights=True), 
-            ModelCheckpoint(model_name, monitor=MONITOR, save_best_only=True, mode="max", verbose=1)
         ],
         validation_data=(validation, validation_target),
         verbose=True,
@@ -224,21 +223,25 @@ def train_lstm_from_batches(
 
 #############################################
 
-def run_with_args():
-    
+if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(
                     prog='LSTM Model Trainer',
-                    description='Generates training data')
+                    description='Trains models on generated data')
     parser.add_argument('input', type=str, help="Path to a folder containing batches or a generated batch")
-    parser.add_argument('--output', '-o', type=str, help="Folder path to output models. If not provided, defaults to placing model beside training data.", default=None)
-    parser.add_argument('--name', '-n', type=str, help="Model name", default="best_model")
-    parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for", default=500)
-    parser.add_argument('--patience', '-p', type=int, help="Cancel training after a given number of epochs if the model does not improve since then", default=50)
     parser.add_argument('--type', '-t', type=str, help="Type of zero-padding to use training the model", default="lrpad")
+    parser.add_argument('--name', '-n', type=str, help="Model file name", default="best_model")
+    parser.add_argument('--output', '-o', type=str, help="Folder path to output models. If not provided, defaults to placing model beside training data.")
+    parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for")
+    parser.add_argument('--patience', '-p', type=int, help="Cancel training after a given number of epochs if the model does not improve since then")
+    
     args = parser.parse_args()
     
-    train_lstm_from_batches(args.input, args.output, type=args.type, epochs=args.epochs, patience=args.patience)
-    
-if __name__ == "__main__":
-    run_with_args()
+    train(
+        input=args.input, 
+        type=args.type,  
+        name=args.name,
+        output=args.output,
+        epochs=args.epochs,
+        patience=args.patience,
+    )
