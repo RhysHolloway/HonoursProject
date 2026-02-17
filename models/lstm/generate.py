@@ -191,10 +191,14 @@ def _generate_simulation(
             
             return dydt
         
-        points = scipy.integrate.odeint(f, s0, t,
-                                full_output=False,
-                                hmin=1e-14,
-                                mxhnil=0, printmessg=False, tfirst=True)
+        with np.errstate(over="raise", invalid="raise"):
+            try:
+                points = scipy.integrate.odeint(f, s0, t,
+                                        full_output=False,
+                                        hmin=1e-14,
+                                        mxhnil=0, printmessg=False, tfirst=True)
+            except:
+                continue
         
         # Put into pandas
         df_traj = pd.DataFrame(points, index=t, columns=['x','y'])
@@ -284,11 +288,11 @@ def _gen_model(
             case _:
                 match type(r):
                     case builtins.ValueError:
-                        if "Jacobian inversion yielded zero vector." in str(r):
+                        if "Jacobian inversion yielded zero vector." in str(r) or "operands could not be broadcast together with shapes" in str(r):
                             break
                         else:
                             traceback.print_exception(r, file=stderr)       
-                    case nl.NoConvergence:
+                    case nl.NoConvergence | builtins.RecursionError:
                         break
                     case concurrent.futures.CancelledError | builtins.UnboundLocalError:
                         pass
