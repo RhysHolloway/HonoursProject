@@ -288,14 +288,11 @@ def _gen_model(
             case _:
                 match type(r):
                     case builtins.ValueError:
-                        if "Jacobian inversion yielded zero vector." in str(r) or "operands could not be broadcast together with shapes" in str(r):
-                            break
-                        else:
-                            traceback.print_exception(r, file=stderr)       
-                    case nl.NoConvergence | builtins.RecursionError:
-                        break
-                    case concurrent.futures.CancelledError | builtins.UnboundLocalError:
-                        pass
+                        if not ("Jacobian inversion yielded zero vector." in str(r) or "operands could not be broadcast together with shapes" in str(r)):
+                            traceback.print_exception(r, file=stderr)
+                        continue
+                    case nl.NoConvergence | builtins.RecursionError | builtins.UnboundLocalError:
+                        continue
                     case _:
                         traceback.print_exception(r, file=stderr)
     
@@ -442,6 +439,7 @@ def _simulate(
                     sigma=sigma,
                 )['p0']
                 
+                # Get the last non-NaN index
                 t_nan = sim.last_valid_index()
                 if t_nan is None or t_nan < ts_len:
                     continue
@@ -465,7 +463,6 @@ def _simulate(
                         # Label
                         bif_type,
                     ))
-                    continue
     
                 
     return sims

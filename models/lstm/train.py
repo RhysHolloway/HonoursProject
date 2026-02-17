@@ -209,7 +209,7 @@ if __name__ == "__main__":
     parser.add_argument('--name', '-n', type=str, help="Model file name", default="best_model")
     parser.add_argument('--output', '-o', type=str, help="Folder path to output models. If not provided, defaults to placing model beside training data.")
     parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for", default=_DEFAULT_EPOCHS)
-    parser.add_argument('--patience', '-p', type=int, help="Cancel training after a given number of epochs if the model does not improve since then", default=_DEFAULT_PATIENCE)
+    parser.add_argument('--patience', '-c', type=int, help="Cancel training after a given number of epochs if the model does not improve since then", default=_DEFAULT_PATIENCE)
     
     args = parser.parse_args()
     
