@@ -344,21 +344,25 @@ def save_test_models(folder: str, models: Iterable[_Model]):
         series.to_csv(os.path.join(folder, f"len{ts_len}", "transitions.csv"))
         
             
-def read_test_models(folder: str, name: Hashable | None = None):
+def read_test_models(folder: str, ts_len: int, name: str | None = None) -> list[_Model] | None:
     import os.path
-    for len_file in os.listdir(folder):
-        len_folder = os.path.join(folder, len_file)
-        if os.path.isdir(len_folder) and len_file.startswith("len") and len_file[3:].isdigit():
-            ts_len = int(len_file[3:])
-            transitions = pd.read_csv(os.path.join(len_folder, "transitions.csv"), index_col=0, names=["model", "tcrit"])["tcrit"]
-            for mname, tcrit in (transitions.items() if name is None else [(name, transitions[name])]):
-                model = pd.read_csv(os.path.join(len_folder, mname + ".csv"), index_col=False)
-                yield mname, [Dataset(
-                    name=f"{mname}_{tsid}_len{ts_len}",
-                    df=df.set_index("time"),
-                    feature_cols=Dataset._convert_feature_cols(df.columns.drop(["tsid", "time"])),
-                    age_format="",
-                ) for tsid, df in model.groupby("tsid", as_index=False)], tcrit
+    len_folder = os.path.join(folder, f"len{ts_len}/")
+    transitions_file = os.path.join(len_folder, "transitions.csv")
+    if not os.path.exists(transitions_file):
+        return None
+    transitions = pd.read_csv(transitions_file, index_col=0, names=["model", "tcrit"])["tcrit"]
+    if name is not None and name not in transitions.index:
+        return None
+    models: list[_Model] = []
+    for mname, tcrit in (transitions.items() if name is None else [(name, transitions[name])]):
+        model = pd.read_csv(os.path.join(len_folder, f"{mname}.csv"), index_col=False)
+        models.append((f"{mname}", [Dataset(
+            name=f"{mname}_{tsid}_len{ts_len}",
+            df=df.set_index("time"),
+            feature_cols=Dataset._convert_feature_cols(df.columns.drop(["tsid", "time"])),
+            age_format="",
+        ) for tsid, df in model.groupby("tsid", as_index=False)], tcrit))
+    return models
             
 type _Metrics = tuple[pd.DataFrame, pd.DataFrame]
 def generate_metrics(name: str, lstm: LSTM, models: list[Dataset], tcrit: float, output: str | None = None) -> _Metrics:
@@ -437,19 +441,20 @@ type _ModelGenerator = dict[str, Callable[[], tuple[list[Dataset], float]]]
 def get_or_generate_models(lengths: Sequence[int] = [1500, 500], path: str | None = None):
     models: list[_Model] = []
     for name, mfunc in map(lambda mfunc: (mfunc.__name__, functools.partial(mfunc, lengths=lengths)), [may_fold, cr_hopf, cr_trans]):
-        if path is not None:
-            loaded = list(read_test_models(path, name))
-            if len(loaded) != 0:
-                print("Loaded", name)
-                models += loaded
-                continue
-    
-        for datasets, tcrit in mfunc():
-            print("Generating", name)
-            model = (name, datasets, tcrit)
-            models.append(model)
+        for ts_len in lengths:
             if path is not None:
-                save_test_models(path, [model])
+                loaded = read_test_models(path, ts_len, name)
+                if loaded is not None and len(loaded) != 0:
+                    print("Loaded", name)
+                    models += loaded
+                    continue
+        
+            for datasets, tcrit in mfunc():
+                print("Generating", name)
+                model = (name, datasets, tcrit)
+                models.append(model)
+                if path is not None:
+                    save_test_models(path, [model])
 
     return models
     
