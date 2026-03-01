@@ -331,7 +331,12 @@ def save_test_models(folder: str, models: Iterable[_Model]):
         pd.concat([dataset.df.reset_index()[["tsid", "time"] + list(dataset.feature_cols.keys())] for dataset in datasets]).to_csv(os.path.join(len_folder, name + ".csv"), index=False)
         
         if ts_len not in tcrits:
-            tcrits[ts_len] = pd.read_csv(os.path.join(len_folder, "transitions.csv"), names=["model", "tcrit"])["tcrit"]
+            transitions = os.path.join(len_folder, "transitions.csv")
+            if os.path.exists(transitions):
+                tcrits[ts_len] = pd.read_csv(transitions, names=["model", "tcrit"])["tcrit"]
+            else:
+                tcrits[ts_len] = pd.Series(name="tcrit")
+                tcrits[ts_len].index.name = "model"
         
         tcrits[ts_len][name] = tcrit
     
