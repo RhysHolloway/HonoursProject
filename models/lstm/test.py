@@ -333,7 +333,7 @@ def save_test_models(folder: str, models: Iterable[_Model]):
         if ts_len not in tcrits:
             transitions = os.path.join(len_folder, "transitions.csv")
             if os.path.exists(transitions):
-                tcrits[ts_len] = pd.read_csv(transitions, names=["model", "tcrit"])["tcrit"]
+                tcrits[ts_len] = pd.read_csv(transitions, index_col="model")["tcrit"]
             else:
                 tcrits[ts_len] = pd.Series(name="tcrit")
                 tcrits[ts_len].index.name = "model"
@@ -351,7 +351,7 @@ def read_test_models(folder: str, ts_len: int, name: str | None = None) -> list[
     if not os.path.exists(transitions_file):
         return None
     transitions = pd.read_csv(transitions_file, index_col=0, names=["model", "tcrit"])["tcrit"]
-    if name is not None and name not in transitions.index:
+    if name is not None and name not in transitions:
         return None
     models: list[_Model] = []
     for mname, tcrit in (transitions.items() if name is None else [(name, transitions[name])]):
