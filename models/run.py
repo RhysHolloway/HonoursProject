@@ -6,7 +6,7 @@ if __name__ == "__main__":
 
     import models.lstm.test as test
     
-    lstm = LSTMLoader(get_project_path("output/models/lstm/")).with_args(verbose=False, spacing=5)
+    lstm = LSTMLoader(get_project_path("bury_models/")).with_args(verbose=True, spacing=5)
     
     plot_output = get_project_path("output/plots")
         

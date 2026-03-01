@@ -1,5 +1,5 @@
 import functools
-from typing import Final, OrderedDict, Self, Sequence, Callable
+from typing import Any, Final, OrderedDict, Self, Sequence, Callable
 from models import Column, Dataset, Model
 
 import numpy as np
@@ -9,7 +9,6 @@ from scipy.signal import find_peaks
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 from keras.models import load_model, Sequential as KerasModel
@@ -19,7 +18,6 @@ class LSTMLoader:
     def __init__(self: Self, path: str):
         import os
         import os.path
-        import functools
         
         EXTENSIONS = [".keras", ".h5"]
         
@@ -27,7 +25,7 @@ class LSTMLoader:
         
         for path, _, files in os.walk(path):
             for file in files:
-                file_path = os.path.join(path, file)
+                file_path: str = os.path.join(path, file)
                 if os.path.isfile(file_path) and any(file.endswith(ext) for ext in EXTENSIONS):
                     model: KerasModel = load_model(file_path)
                     ts_len = model.input_shape[1]
@@ -38,7 +36,7 @@ class LSTMLoader:
         if len(found) == 0:
             raise ValueError(f"Could not load any models from {path}!")
         
-        self.models: Final[OrderedDict[int, KerasModel]] = OrderedDict(sorted(found.items()))
+        self.models: Final[OrderedDict[int, list[KerasModel]]] = OrderedDict(sorted(found.items()))
         
     @property
     def with_args(self: Self):
@@ -54,6 +52,7 @@ class LSTM(Model[pd.DataFrame]):
     def __init__(
         self: Self,
         get_models: Callable[[pd.Series], Sequence[KerasModel]],
+        name: str | None = None,
         bandwidth: float = 0.2,
         spacing: int = 10,
         verbose: bool = True,
@@ -66,9 +65,9 @@ class LSTM(Model[pd.DataFrame]):
         self.spacing = spacing
         self.result_means: dict[Dataset, LSTMPeaks] = dict()
         self.result_peaks: dict[Dataset, LSTMPeaks] = dict()
+        self.name = name
     
     COLUMNS: Final[list[str]] = ["Fold", "Hopf", "Branch", "Null"]
-    
     
     def run_on_series(
         self: Self,
@@ -266,12 +265,13 @@ def combine_batches(batches: Iterable[TrainData]) -> TrainData:
     
     return reduce(_reduce_combine, batches)
 
+type Array = np.ndarray[Any, np.dtype[np.float64]]
+type DeFunc = Callable[[Array, float], Array]
+
 def compute_residuals(data: pd.Series, span: float = 0.2) -> pd.Series:
         smooth_data = lowess(data.values, data.index.values, frac=span)[:, 1]
         return pd.Series(data.values - smooth_data, index=data.index, name="Residuals")
     
-type XY = np.ndarray[np.dtype[float]]
-type DeFunc = Callable[[XY, float], XY]
 
 class StochSim():
 
@@ -328,10 +328,10 @@ class StochSim():
     def simulate(
         self: Self,
         de_fun: DeFunc,
-        s0: XY,
+        s0: Array,
         sigma: float, 
         tburn: int = 100, # burn-in period
-        clip: Callable[[XY], XY] = lambda s: s,
+        clip: Callable[[Array], Array] = lambda s: s,
         rand: np.random.RandomState = np.random.mtrand._rand,
     ) -> pd.DataFrame:      
         """
@@ -342,19 +342,19 @@ class StochSim():
         :param de_fun: Derivative equation to simulate
         :type de_fun: DeFunc
         :param s0: Initial value
-        :type s0: XY
+        :type s0: Array
         :param sigma: amplitude factor of GWN - total amplitude also depends on parameter values
         :type sigma: float
         :param tburn: Burn-in length
         :type tburn: int
         :param clip: Optional clipping function for simulation
-        :type clip: Callable[[XY], XY]
+        :type clip: Callable[[Array], Array]
         :return: DataFrame of trajectories indexed by time
         :rtype: DataFrame
         """
         
         ## Implement Euler Maryuyama for stocahstic simulation
-        s: np.ndarray[np.ndarray[float]] = np.empty([len(self.parameter),len(s0)])
+        s: Array = np.empty([len(self.parameter),len(s0)])
         s[:] = np.nan
         
         # Create brownian increments (s.d. sqrt(dt))

@@ -1,5 +1,5 @@
 import traceback
-from typing import Any, Callable, Generic, Iterable, Self, Sequence, TypeVar
+from typing import Callable, Generic, Iterable, Self, Sequence, TypeVar
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
@@ -55,13 +55,13 @@ class Dataset:
     def features(self: Self) -> pd.DataFrame:
         return self.df[self.feature_cols.keys()]
     
-    def feature_names(self: Self) -> Sequence[str]:
+    def feature_names(self: Self) -> Iterable[str]:
         return self.feature_cols.values()
     
     def feature_name(self: Self, col: Column) -> str:
         return self.feature_cols[col]
     
-    def transform(self: Self, function: Callable[[pd.DataFrame, Sequence[Column]], pd.DataFrame]) -> Self:
+    def transform(self: Self, function: Callable[[pd.DataFrame, Iterable[Column]], pd.DataFrame]) -> Self:
         return self.__class__(
                 name=self.name,
                 df=function(self.df, self.feature_cols.keys()),
@@ -121,7 +121,7 @@ class Dataset:
         return df_sel.set_index(age_col)
     
     @staticmethod
-    def _get_age_format(ages: Sequence, age_scale: int):
+    def _get_age_format(ages: Sequence[int | float], age_scale: int):
         match np.log10(min(age for age in ages if age > 0) * age_scale) // 3:
             case 0: return "ya"
             case 1: return "kya"
@@ -132,7 +132,7 @@ class Dataset:
     def _convert_feature_cols(feature_cols: FeatureColumns) -> dict[Column, str]:
         return {col:col if isinstance(col, str) else " ".join(col) for col in feature_cols} if not isinstance(feature_cols, dict) else feature_cols
 
-RESULTS = TypeVar('T')
+RESULTS = TypeVar('RESULTS')
 class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
     
     def __init__(self: Self, name: str):
@@ -140,7 +140,7 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
         self.results: dict[Dataset, RESULTS] = dict()
         
     @abc.abstractmethod
-    def run(self: Self, data: Dataset):
+    def run(self: Self, dataset: Dataset):
         pass
     
     @abc.abstractmethod

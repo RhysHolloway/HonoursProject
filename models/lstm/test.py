@@ -11,7 +11,7 @@ import os.path
 
 from models.metrics import Metrics
 
-from ..lstm import LSTMLoader, Dataset, LSTM, StochSim, XY, DeFunc
+from ..lstm import LSTMLoader, Dataset, LSTM, StochSim, Array, DeFunc
 
 def simulate(
     lengths: Sequence[int],
@@ -19,8 +19,8 @@ def simulate(
     bl: float, 
     bh: float, 
     bcrit: float,
-    init: XY,
-    sigma: XY | float,
+    init: Array,
+    sigma: Array | float,
     sims: int,
     name: str = ""
 ) -> list[tuple[list[Dataset], float]]:
@@ -175,8 +175,9 @@ def cr_hopf(
 def compute_roc(
     df_ews_forced: pd.DataFrame, 
     df_ews_null: pd.DataFrame,
-    bool_pred_early: bool = True
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    bool_pred_early: bool = True,
+    model_name: str | None = None,
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     
     # --------
     # Import EWS and ML data
@@ -275,7 +276,7 @@ def compute_roc(
     # –--------------------
     
     return {
-        "DL Model": roc_compute(df_ml_preds, "bif_prob"),
+        model_name or "DL Model": roc_compute(df_ml_preds, "bif_prob"),
         "Variance": roc_compute(df_ktau_preds, "ktau_variance"),
         "Lag-1 AC": roc_compute(df_ktau_preds, "ktau_ac1"),
     }, df_counts
@@ -386,23 +387,23 @@ def generate_metrics(name: str, lstm: LSTM, models: list[Dataset], tcrit: float,
         
     if output is not None:
         import os.path
-        forced.to_csv(os.path.join(output, f"{name}_ews_roc_forced.csv"), index=False) 
-        null.to_csv(os.path.join(output, f"{name}_ews_roc_null.csv"), index=False)
+        forced.to_csv(os.path.join(output, f"{name}_len{ts_len}_ews_roc_forced.csv"), index=False) 
+        null.to_csv(os.path.join(output, f"{name}_len{ts_len}_ews_roc_null.csv"), index=False)
     
     return forced, null
         
-def load_metric(folder: str, name: str) -> _Metrics | None:
-    forced = os.path.join(folder, f"{name}_ews_roc_forced.csv")
-    null = os.path.join(folder, f"{name}_ews_roc_null.csv")
+def load_metric(folder: str, name: str, ts_len: int) -> _Metrics | None:
+    forced = os.path.join(folder, f"{name}_len{ts_len}_ews_roc_forced.csv")
+    null = os.path.join(folder, f"{name}_len{ts_len}_ews_roc_null.csv")
     if os.path.exists(forced) and os.path.exists(null):
         return pd.read_csv(forced, index_col=False), pd.read_csv(null, index_col=False)
     else:
         return None
         
-def load_metrics(folder: str) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:    
-    return list((name, ) + load_metric(folder, name) for name in set(name[:name.index("_ews_roc_")] for name in os.listdir(folder) if "_ews_roc_" in name and name.endswith(".csv")))
+def load_metrics(folder: str, ts_len: int) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:    
+    return list((name, ) + load_metric(folder, name, ts_len) for name in set(name[:name.index(f"_len{ts_len}_ews_roc")] for name in os.listdir(folder) if "_ews_roc_" in name and name.endswith(".csv")))
 
-def plot_metrics(name: str, forced: pd.DataFrame, null: pd.DataFrame, output: str | None = None):           
+def plot_metrics(name: str, forced: pd.DataFrame, null: pd.DataFrame, output: str | None = None, model_name: str | None = None):           
     for variable in forced["variable"].unique():
         for type in ["early", "late"]:
             
@@ -413,6 +414,7 @@ def plot_metrics(name: str, forced: pd.DataFrame, null: pd.DataFrame, output: st
                 df_forced,
                 df_null,
                 bool_pred_early = type == "early",
+                model_name=model_name,
             )
             
             fig = plot_roc(
@@ -448,14 +450,15 @@ def get_or_generate_models(lengths: Sequence[int] = [1500, 500], path: str | Non
     
 def load_and_save(metrics_path: str | None, output: str | None, lstm: LSTM | None, models: Iterable[_Model]):
     for name, datasets, tcrit in models:
-        metric = load_metric(metrics_path, name)
+        ts_len = len(datasets[0].df)
+        metric = load_metric(metrics_path, name, ts_len) if metrics_path is not None else None
         if metric is None:
             if lstm is None:
                 raise ValueError("Please provide an LSTM to generate missing metrics!")
             print("Generating metrics for", name)
             metric = generate_metrics(name=name, lstm=lstm, models=datasets, tcrit=tcrit, output=metrics_path)
         forced, null = metric
-        plot_metrics(name, forced, null, output=output)
+        plot_metrics(name, forced, null, output=output, model_name=lstm.name if lstm is not None else None)
         
 if __name__ == "__main__":
     import argparse
