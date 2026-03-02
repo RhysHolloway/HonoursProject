@@ -184,11 +184,11 @@ def compute_roc(
     # # Import EWS data
     # Use EWS data in x
     
-    def ktau_df(df: pd.DataFrame):
-        return df[["tsid", "time", "ktau_variance", "ktau_ac1"]].dropna()
+    # def ktau_df(df: pd.DataFrame):
+    #     return df[["tsid", "time", "ktau_variance", "ktau_ac1"]].dropna()
     
-    def ml_df(df: pd.DataFrame):
-        return df[["tsid", "time"] + LSTM.COLUMNS].dropna()
+    # def ml_df(df: pd.DataFrame):
+    #     return df[["tsid", "time"] + LSTM.COLUMNS].dropna()
 
     # ---------------------------
     # Get predictions from trajectories
@@ -218,22 +218,18 @@ def compute_roc(
         # than others.
         n_predictions = 10
         
-        def extract(df: pd.DataFrame):
-            df = df.iloc[np.round(np.linspace(0, len(df) - 1, n_predictions)).astype(int)]
-            df["truth_value"] = truth
-            return df
-
-        return (
-            extract(ktau_df(df_timed)), 
-            extract(ml_df(df_timed))
-        )
+        df = df_timed
+        df = df.iloc[np.round(np.linspace(0, len(df) - 1, n_predictions)).astype(int)]
+        df["truth_value"] = truth
+        return df
         
-    forced = [predictions(df, 1) for _, df in df_ews_forced.groupby("tsid")]
-    null = [predictions(df, 0) for _, df in df_ews_null.groupby("tsid")]
+    forced = pd.concat([predictions(df, 1) for _, df in df_ews_forced.groupby("tsid")])
+    null = pd.concat([predictions(df, 0) for _, df in df_ews_null.groupby("tsid")])
+    preds = pd.concat([forced, null])
 
     # Concatenate data
-    df_ktau_preds: pd.DataFrame = pd.concat(itertools.chain((f[0] for f in forced), (f[0] for f in null)))
-    df_ml_preds: pd.DataFrame = pd.concat(itertools.chain((f[1] for f in forced), (f[1] for f in null)))
+    df_ktau_preds: pd.DataFrame = preds[["tsid", "time", "ktau_variance", "ktau_ac1", "truth_value"]].dropna()
+    df_ml_preds: pd.DataFrame = preds[["tsid", "time", "truth_value"] + LSTM.COLUMNS].dropna()
     
     df_ml_preds["bif_prob"] = np.sum(df_ml_preds[LSTM.COLUMNS[:-1]].to_numpy(), axis=1)
 
