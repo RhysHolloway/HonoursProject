@@ -46,7 +46,7 @@ class LSTMLoader:
         # Get the model with the closest input length lower or equal to the input series length (or else get the model with the lowest input length if none can be found)
         return self.models[next((ts_len for ts_len in reversed(self.models.keys()) if ts_len <= len(series)), next(iter(self.models.keys())))]
 
-type LSTMPeaks = dict[Column, dict[str, Sequence[int]]]
+type LSTMPeaks = dict[Column | None, dict[str, Sequence[int]]]
 class LSTM(Model[pd.DataFrame]):
         
     def __init__(
@@ -189,10 +189,6 @@ class LSTM(Model[pd.DataFrame]):
         means = self.means(dataset)
         peaks = self.peaks(dataset)
         
-        def plot_peak(ax: Axes, df: pd.DataFrame, col: str):
-            indices = peaks[feature][col]
-            ax.scatter(df.index[indices], df.iloc[indices])
-        
         subplots: Sequence[Axes] = fig.subplots(nrows=len(self.COLUMNS), ncols=1, sharex='all', sharey='all')
         
         mean_ax = subplots[-1]
@@ -205,12 +201,14 @@ class LSTM(Model[pd.DataFrame]):
             ax = subplots[i]
             ax.set_ylabel(col + " Probability")
             for feature, data in preds.groupby("variable"):
-                data = data.set_index("time")[col]
-                ax.plot(data.index, data)
-                plot_peak(ax, data, col)
+                series: pd.Series = data.set_index("time")[col]
+                ax.plot(data.index, series)
+                indices = peaks[feature][col]
+                ax.scatter(series.index[indices], series.iloc[indices])
             
             mean_ax.plot(means[col], label=col)
-            plot_peak(ax, means, col)
+            indices = peaks[None][col]
+            ax.scatter(means[col].index[indices], means[col].iloc[indices])
             
         fig.legend(dataset.feature_names())
         
@@ -329,7 +327,7 @@ class StochSim():
         self: Self,
         de_fun: DeFunc,
         s0: Array,
-        sigma: float, 
+        sigma: Array | float, 
         tburn: int = 100, # burn-in period
         clip: Callable[[Array], Array] = lambda s: s,
         rand: np.random.RandomState = np.random.mtrand._rand,

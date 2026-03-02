@@ -1,10 +1,8 @@
-import functools
-from typing import Any, Callable, Final, Hashable, Iterable, Sequence
-from matplotlib.figure import Figure
+import itertools
+from typing import Callable, Iterable, Sequence
 from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
-from scipy import stats
 from sklearn import metrics
 import matplotlib.pyplot as plt
 import os.path
@@ -64,14 +62,14 @@ def simulate(
             )
         for tsid, dataset in enumerate(maximums[0])], maximums[1]
     
-    sims: list[tuple[list[Dataset], float]] = []
+    results: list[tuple[list[Dataset], float]] = []
     
     for ts_len in lengths:
         if ts_len != max_len:
-            sims.append(of_length(ts_len))
+            results.append(of_length(ts_len))
     
-    sims.append(maximums)
-    return sims 
+    results.append(maximums)
+    return results 
 
 def may_fold(
     lengths: Iterable[int],
@@ -86,7 +84,7 @@ def may_fold(
     bcrit = 0.260437  # bifurcation point (computed in Mathematica)
     x0 = 0.8197  # intial condition (equilibrium value computed in Mathematica)
         
-    def de_fun(x: np.ndarray[float], a: float) -> np.ndarray[float]:
+    def de_fun(x: Array, a: float) -> Array:
         x = x[0]
         return np.array([
             r * x * (1 - x / k) - a * (x**2 / (s**2 + x**2))
@@ -98,7 +96,7 @@ def may_fold(
         bl=bl,
         bh=bh,
         bcrit=bcrit,
-        init=[x0],
+        init=np.array([x0]),
         sigma=0.01,
         sims=sims,
     )
@@ -118,7 +116,7 @@ def cr_trans(
     x0 = 1  # intial condition (equilibrium value computed in Mathematica)
     y0 = 0.412
     
-    def de_fun(s: np.ndarray[float], a: float) -> np.ndarray[float]:
+    def de_fun(s: Array, a: float) -> Array:
         x, y = s
         return np.array([
             r * x * (1 - x / k) - (a * x * y) / (1 + a * h * x),
@@ -131,7 +129,7 @@ def cr_trans(
         bl=al,
         bh=ah,
         bcrit=abif,
-        init=[x0, y0],
+        init=np.array([x0, y0]),
         sigma=0.01,
         sims=sims,
     )
@@ -154,7 +152,7 @@ def cr_hopf(
     x0 = 1  # intial condition (equilibrium value computed in Mathematica)
     y0 = 0.412    
     
-    def de_fun(s: np.ndarray[float], a: float) -> np.ndarray[float]:
+    def de_fun(s: Array, a: float) -> Array:
         x, y = s
         return np.array([
             r * x * (1 - x / k) - (a * x * y) / (1 + a * h * x),
@@ -167,7 +165,7 @@ def cr_hopf(
         bl=al,
         bh=ah,
         bcrit=abif,
-        init=[x0, y0],
+        init=np.array([x0, y0]),
         sigma=np.array([sigma_x, sigma_y]),
         sims=sims,
     )
@@ -230,12 +228,12 @@ def compute_roc(
             extract(ml_df(df_timed))
         )
         
-    forced_ktau, forced_ml = zip(*(predictions(df, 1) for _, df in df_ews_forced.groupby("tsid")))
-    null_ktau, null_ml = zip(*(predictions(df, 0) for _, df in df_ews_null.groupby("tsid")))
+    forced = [predictions(df, 1) for _, df in df_ews_forced.groupby("tsid")]
+    null = [predictions(df, 0) for _, df in df_ews_null.groupby("tsid")]
 
     # Concatenate data
-    df_ktau_preds: pd.DataFrame = pd.concat(forced_ktau + null_ktau)
-    df_ml_preds: pd.DataFrame = pd.concat(forced_ml + null_ml)
+    df_ktau_preds: pd.DataFrame = pd.concat(itertools.chain((f[0] for f in forced), (f[0] for f in null)))
+    df_ml_preds: pd.DataFrame = pd.concat(itertools.chain((f[1] for f in forced), (f[1] for f in null)))
     
     df_ml_preds["bif_prob"] = np.sum(df_ml_preds[LSTM.COLUMNS[:-1]].to_numpy(), axis=1)
 
@@ -392,8 +390,8 @@ def generate_metrics(name: str, lstm: LSTM, models: list[Dataset], tcrit: float,
         else:
             assert ts_len == len(dataset.df)
         
-        list_df_forced.append(run_metrics(tsid, None))
-        list_df_null.append(run_metrics(tsid, tcrit))
+        list_df_forced.append(run_metrics(tsid, tcrit))
+        list_df_null.append(run_metrics(tsid, None))
         
     forced, null = pd.concat(list_df_forced), pd.concat(list_df_null)
         
@@ -404,13 +402,19 @@ def generate_metrics(name: str, lstm: LSTM, models: list[Dataset], tcrit: float,
     
     return forced, null
         
-def load_metric(folder: str, name: str, ts_len: int) -> _Metrics | None:
+def try_load_metric(folder: str, name: str, ts_len: int) -> _Metrics | None:
     forced = os.path.join(folder, f"{name}_len{ts_len}_ews_roc_forced.csv")
     null = os.path.join(folder, f"{name}_len{ts_len}_ews_roc_null.csv")
     if os.path.exists(forced) and os.path.exists(null):
         return pd.read_csv(forced, index_col=False), pd.read_csv(null, index_col=False)
     else:
         return None
+    
+def load_metric(folder: str, name: str, ts_len: int) -> _Metrics:
+    metrics = try_load_metric(folder, name, ts_len)
+    if metrics is None:
+        raise ValueError("Could not find metrics in folder", folder)
+    return metrics
         
 def load_metrics(folder: str, ts_len: int) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:    
     return list((name, ) + load_metric(folder, name, ts_len) for name in set(name[:name.index(f"_len{ts_len}_ews_roc")] for name in os.listdir(folder) if "_ews_roc_" in name and name.endswith(".csv")))
@@ -464,7 +468,7 @@ def get_or_generate_models(lengths: Sequence[int] = [1500, 500], path: str | Non
 def load_and_save(metrics_path: str | None, output: str | None, lstm: LSTM | None, models: Iterable[_Model]):
     for name, datasets, tcrit in models:
         ts_len = len(datasets[0].df)
-        metric = load_metric(metrics_path, name, ts_len) if metrics_path is not None else None
+        metric = try_load_metric(metrics_path, name, ts_len) if metrics_path is not None else None
         if metric is None:
             if lstm is None:
                 raise ValueError("Please provide an LSTM to generate missing metrics!")

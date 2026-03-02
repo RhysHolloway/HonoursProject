@@ -1,5 +1,5 @@
 import traceback
-from typing import Callable, Generic, Iterable, Self, Sequence, TypeVar
+from typing import Any, Callable, Generic, Iterable, Self, Sequence, TypeVar
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
@@ -40,7 +40,7 @@ class Dataset:
         
         feature_cols = __class__._convert_feature_cols(feature_cols)
         
-        loaded_df = __class__._prepare_df(df(), age_col, feature_cols.keys())   
+        loaded_df = __class__._prepare_df(df(), age_col, list(feature_cols.keys()))   
         
         return Dataset(
             name=name,
@@ -87,7 +87,7 @@ class Dataset:
     def _prepare_df(
         df: pd.DataFrame,
         age_col: Column,
-        feature_cols: Column,
+        feature_cols: Sequence[Column],
     ) -> pd.DataFrame:
         
         # Select relevant columns and ensure age is present
@@ -105,12 +105,7 @@ class Dataset:
                 f"Requested features: {feature_cols}"
             )
 
-        try:
-            df_sel[feature_cols] = df_sel[feature_cols].astype(float)
-        except Exception:
-            # If conversion fails, attempt coercion to numeric (non-numeric -> NaN)
-            for c in feature_cols:
-                df_sel[c] = pd.to_numeric(df_sel[c], errors="coerce")
+        df_sel[feature_cols] = df_sel[feature_cols].astype(float)
 
         # Final drop: remove rows that are still entirely NaN in the feature columns
         df_sel = df_sel.dropna(subset=feature_cols, how='all')
@@ -121,7 +116,7 @@ class Dataset:
         return df_sel.set_index(age_col)
     
     @staticmethod
-    def _get_age_format(ages: Sequence[int | float], age_scale: int):
+    def _get_age_format(ages: Iterable[Any], age_scale: int):
         match np.log10(min(age for age in ages if age > 0) * age_scale) // 3:
             case 0: return "ya"
             case 1: return "kya"
