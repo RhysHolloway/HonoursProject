@@ -14,7 +14,7 @@ from models.metrics import Metrics
 from ..lstm import LSTMLoader, Dataset, LSTM, StochSim, Array, DeFunc
 
 def simulate(
-    lengths: Sequence[int],
+    lengths: Iterable[int],
     de_fun: DeFunc,
     bl: float, 
     bh: float, 
@@ -74,7 +74,7 @@ def simulate(
     return sims 
 
 def may_fold(
-    lengths: Sequence[int],
+    lengths: Iterable[int],
     sims: int = 10
 ):
     
@@ -104,7 +104,7 @@ def may_fold(
     )
     
 def cr_trans(
-    lengths: Sequence[int],sf: int = 4, sims: int = 10):
+    lengths: Iterable[int],sf: int = 4, sims: int = 10):
         
     # Model parameters
     r = 1 * sf
@@ -137,7 +137,7 @@ def cr_trans(
     )
     
 def cr_hopf(
-    lengths: Sequence[int],sf: int = 4, sims: int = 10):
+    lengths: Iterable[int],sf: int = 4, sims: int = 10):
 
     # Model parameters
     # sf = 4  # scale factor
@@ -344,24 +344,27 @@ def save_test_models(folder: str, models: Iterable[_Model]):
         series.to_csv(os.path.join(folder, f"len{ts_len}", "transitions.csv"))
         
             
-def read_test_models(folder: str, ts_len: int, name: str | None = None) -> list[_Model] | None:
+def read_test_models(folder: str, name: str | None = None) -> list[_Model]:
     import os.path
-    len_folder = os.path.join(folder, f"len{ts_len}/")
-    transitions_file = os.path.join(len_folder, "transitions.csv")
-    if not os.path.exists(transitions_file):
-        return None
-    transitions = pd.read_csv(transitions_file, index_col=0, names=["model", "tcrit"])["tcrit"]
-    if name is not None and name not in transitions:
-        return None
     models: list[_Model] = []
-    for mname, tcrit in (transitions.items() if name is None else [(name, transitions[name])]):
-        model = pd.read_csv(os.path.join(len_folder, f"{mname}.csv"), index_col=False)
-        models.append((f"{mname}", [Dataset(
-            name=f"{mname}_{tsid}_len{ts_len}",
-            df=df.set_index("time"),
-            feature_cols=Dataset._convert_feature_cols(df.columns.drop(["tsid", "time"])),
-            age_format="",
-        ) for tsid, df in model.groupby("tsid", as_index=False)], tcrit))
+    for len_file in os.listdir(folder):
+        len_folder = os.path.join(folder, len_file)
+        if os.path.isdir(len_folder) and len_file.startswith("len") and len_file[3:].isdigit():
+            ts_len = int(len_file[3:])
+            transitions_file = os.path.join(len_folder, "transitions.csv")
+            if not os.path.exists(transitions_file):
+                continue
+            transitions = pd.read_csv(transitions_file, index_col=0, names=["model", "tcrit"])["tcrit"]
+            if name is not None and name not in transitions:
+                continue
+            for mname, tcrit in (transitions.items() if name is None else [(name, transitions[name])]):
+                model = pd.read_csv(os.path.join(len_folder, f"{mname}.csv"), index_col=False)
+                models.append((f"{mname}", [Dataset(
+                    name=f"{mname}_{tsid}_len{ts_len}",
+                    df=df.set_index("time"),
+                    feature_cols=Dataset._convert_feature_cols(df.columns.drop(["tsid", "time"])),
+                    age_format="",
+                ) for tsid, df in model.groupby("tsid", as_index=False)], tcrit))
     return models
             
 type _Metrics = tuple[pd.DataFrame, pd.DataFrame]
@@ -440,22 +443,22 @@ type _ModelGenerator = dict[str, Callable[[], tuple[list[Dataset], float]]]
 
 def get_or_generate_models(lengths: Sequence[int] = [1500, 500], path: str | None = None):
     models: list[_Model] = []
-    for name, mfunc in map(lambda mfunc: (mfunc.__name__, functools.partial(mfunc, lengths=lengths)), [may_fold, cr_hopf, cr_trans]):
-        for ts_len in lengths:
-            if path is not None:
-                loaded = read_test_models(path, ts_len, name)
-                if loaded is not None and len(loaded) != 0:
-                    print("Loaded", name)
-                    models += loaded
-                    continue
-        
-            for datasets, tcrit in mfunc():
-                print("Generating", name)
-                model = (name, datasets, tcrit)
-                models.append(model)
-                if path is not None:
-                    save_test_models(path, [model])
-
+    lengths_set: set[int] = set(lengths)
+    for name, mfunc in map(lambda mfunc: (mfunc.__name__, mfunc), [may_fold, cr_hopf, cr_trans]):
+        if path is not None:
+            loaded = read_test_models(path, name)
+            found = set((len(datasets[0].df) for _, datasets, _, in loaded))
+            if found.issuperset(lengths_set):
+                print("Loaded", name)
+                models += loaded
+            else:
+                required = lengths_set.difference(found)
+                print("Generating model", name, "for lengths", required)
+                for datasets, tcrit in mfunc(lengths=required):
+                    model = (name, datasets, tcrit)
+                    models.append(model)
+                    if path is not None:
+                        save_test_models(path, [model])
     return models
     
 def load_and_save(metrics_path: str | None, output: str | None, lstm: LSTM | None, models: Iterable[_Model]):
@@ -465,7 +468,7 @@ def load_and_save(metrics_path: str | None, output: str | None, lstm: LSTM | Non
         if metric is None:
             if lstm is None:
                 raise ValueError("Please provide an LSTM to generate missing metrics!")
-            print("Generating metrics for", name)
+            print("Generating metrics for", name, "length", ts_len)
             metric = generate_metrics(name=name, lstm=lstm, models=datasets, tcrit=tcrit, output=metrics_path)
         forced, null = metric
         plot_metrics(name, forced, null, output=output, model_name=lstm.name if lstm is not None else None)
@@ -477,7 +480,7 @@ if __name__ == "__main__":
                     description='Tests trained models against simulated data')
     parser.add_argument('output', type=str)
     parser.add_argument('--lstm', '-l', type=str)
-    parser.add_argument('--simulations', '-s', type=str|bool)
+    parser.add_argument('--simulations', '-s', type=str)
     parser.add_argument('--metrics', '-i', type=str)
     args = parser.parse_args()
     
