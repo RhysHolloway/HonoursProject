@@ -11,7 +11,9 @@ DIR=$(dirname ${BASH_SOURCE[0]})
 
 BATCHES=25
 
-source $DIR/env.sh
+cd $DIR
+git fetch origin && git pull
+source env.sh
 
 for len in 500 1500 ;
 do
