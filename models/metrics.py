@@ -1,13 +1,12 @@
-from typing import Any, Callable, Literal, Optional, Self, Sequence
+from typing import Literal, Self, Sequence
 from matplotlib import pyplot
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
 import scipy.stats
-from models import Dataset, Model
-
-import ewstools
+from scipy.stats._axis_nan_policy import SmallSampleWarning
+from models import Dataset, Model, compute_residuals, space_indices
 
 class Metrics(Model[pd.DataFrame]):
     
@@ -28,40 +27,72 @@ class Metrics(Model[pd.DataFrame]):
 
     # Compute kendall tau values at equally spaced time points
     @staticmethod
-    def ktau(series: pd.Series, indices: Callable[[pd.Series], pd.Index] | pd.Index = lambda series: series.index, name: str | None = None) -> pd.Series:
-        indices = indices(series) if callable(indices) else indices
-        
+    def ktau(series: pd.Series, spacing: int) -> pd.Series:        
         # Get first non-NaN index in series
-        start = series[pd.notna(series)].index[1]
+        indices = space_indices(series, spacing)
+        if len(indices) == 0:
+            return pd.Series(name = f"ktau_{series.name}")
+        start = indices.pop(0)
         
-        def compute(t_end) -> float:
-            s = series.loc[start:t_end]
+        def compute(imax: int) -> float:
+            s = series.iloc[start:imax]
             import warnings
-            with warnings.catch_warnings(action="ignore", category=scipy.stats._axis_nan_policy.SmallSampleWarning):
-                return scipy.stats.kendalltau(s.index.to_numpy(), s.to_numpy())[0]
-        
+            with warnings.catch_warnings(action="ignore", category=SmallSampleWarning):
+                return scipy.stats.kendalltau(s.index.to_numpy(), s.to_numpy())[0] # type: ignore
         # Return series
-        return pd.Series(map(compute, indices), index=indices, name=name)
+        return pd.Series(map(compute, indices), index=series.index[indices], name = f"ktau_{series.name}")
     
-    def run_on_series(self: Self, series: pd.Series, transition = None) -> pd.DataFrame:
+    @staticmethod
+    def window_index(series: pd.Series, window: float) -> int:
+        if window <= 0:
+            raise ValueError("Rolling window is less than zero!")
+        return int(window * len(series) if 0 < window <= 1 else window)
+    
+    @staticmethod
+    def variance(rolling: pd.api.typing.Rolling) -> pd.Series:
+        var: pd.Series = rolling.var()
+        var.name = "variance"
+        return var
         
-        ts = ewstools.TimeSeries(series, transition=transition or self.transition)
-        ts.detrend(method=self.detrend_method)
+    @staticmethod
+    def std(rolling: pd.api.typing.Rolling) -> pd.Series:
+        var: pd.Series = rolling.std()
+        var.name = "std"
+        return var
         
-        ts.compute_var(rolling_window=self.window)
-        ts.compute_auto(lag=1, rolling_window=self.window)
+    @staticmethod
+    def ac1(rolling: pd.api.typing.Rolling) -> pd.Series:
+        auto: pd.Series = rolling.apply(func=lambda x: pd.Series(x).autocorr(lag=1), raw=True)
+        auto.name = "ac1"
+        return auto
+    
+    def run_on_series(self: Self, series: pd.Series, transition: int | None = None, ktau_distance: int | None = None, window: float | None = None) -> pd.DataFrame:
         
-        STATE_COLS = ["state", "smoothing", "residuals"]
-        EWS_COLS = ["variance", "ac1"]
+        series = series.copy(deep=False)
+        series.index = series.index.get_level_values("time")
         
-        df = pd.concat([ts.state[STATE_COLS], ts.ews[EWS_COLS]], axis=1).rename({"state":"value"})
+        if transition is not None:
+            series = series[series.index <= transition]
         
-        if self.ktau_distance:
-            indices = df.index[::self.ktau_distance]
-            for col in EWS_COLS:
-                df["ktau_" + col] = self.ktau(df[col], indices)
+        if window is None:
+            window = self.window
+        window = self.window_index(series, window)
             
-        df.insert(0, "variable", [series.name] * len(df))
+        residuals = compute_residuals(series, type=self.detrend_method) # type: ignore
+        rolling = residuals.rolling(window=window)
+        variance = self.variance(rolling)
+        ac1 = self.ac1(rolling)
+    
+        df = series.to_frame(name="value").join([residuals, variance, ac1])
+        
+        if ktau_distance is None:
+            ktau_distance = self.ktau_distance
+        
+        if ktau_distance:
+            for col in ["variance", "ac1"]:
+                df["ktau_" + col] = self.ktau(df[col], spacing=ktau_distance)
+            
+        # df.insert(0, "variable", [series.name] * len(df))
 
         return df
     
@@ -69,7 +100,7 @@ class Metrics(Model[pd.DataFrame]):
         self: Self,
         dataset: Dataset,
     ):
-        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys()))
+        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys())) # type: ignore
         
     def _print(self: Self, dataset: Dataset):
         pass                   
@@ -89,9 +120,9 @@ class Metrics(Model[pd.DataFrame]):
             if i == ROWS - 1:
                 axs[i].set_xlabel(f"Age ({dataset.age_format})")
             if data is not None:
-                names = dataset.feature_names()
-                for j, data in enumerate(data):
-                    axs[i].plot(data, data.index, label=names[j])
+                # names = dataset.feature_names()
+                # for j, data in enumerate(data):
+                axs[i].plot(data, data.index, label=title)
                     
             plot(results["state"], "Data", 0)
             plot(results["variance"], "Variance", 1)

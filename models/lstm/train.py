@@ -19,7 +19,9 @@ import pandas as pd
 import atomics
 from concurrent.futures import ThreadPoolExecutor
 
-from ..lstm import INDEX_COL, Sims, TrainData, combine_batches, compute_residuals
+from .. import compute_residuals
+from ..metrics import Metrics
+from ..lstm import INDEX_COL, Sims, TrainData, combine_batches
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
@@ -35,9 +37,9 @@ _DEFAULT_EPOCHS = 500
 _DEFAULT_PATIENCE = 50
 def train(
     data: TrainData,
+    output: str,
     type: Literal["lpad", "lrpad"],
     name: str = "best_model",
-    output: Union[str, None] = None,
     epochs: int = _DEFAULT_EPOCHS,
     patience: int = _DEFAULT_PATIENCE,
     batch_size: int = 32,
@@ -45,6 +47,7 @@ def train(
     kernel_size: int = 12,
     kernel_initializer: str = 'lecun_normal',
     optimizer: Optimizer = Adam(learning_rate = 0.0005),
+    verbose: bool = True,
 ) -> Sequential:
     sims, df_labels, df_groups = data
     labels = pd.merge(df_groups, df_labels, left_index=True, right_index=True)
@@ -60,7 +63,11 @@ def train(
         case _:
             raise ValueError("Please provide valid type as input: lrpad, lpad")
     
-    model_name = f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.keras"
+    
+    def format_name(object: str, ext: str):
+        return f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.{ext}"
+    
+    model_name = format_name("model", "keras")
     
     print("Computing training data from simulations...")
 
@@ -70,7 +77,7 @@ def train(
     counter.store(0)
     
     def to_traindata(tsid: int) -> np.ndarray:
-        values = compute_residuals(sims[tsid]).to_numpy(copy=True)
+        values = compute_residuals(sims[tsid]).to_numpy()
         
         # Padding and normalizing input sequences
         values[:int(pad_left * random.uniform(0, 1))] = 0
@@ -134,11 +141,11 @@ def train(
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[
-            ModelCheckpoint(model_name, monitor=MONITOR, save_best_only=True, mode="max", verbose=1),
+            ModelCheckpoint(model_name, monitor=MONITOR, save_best_only=True, mode="max", verbose=1 if verbose else 0),
             EarlyStopping(monitor=MONITOR, patience=patience, restore_best_weights=True), 
         ],
         validation_data=(validation, validation_target),
-        verbose=True,
+        verbose="auto" if verbose else 0, # type: ignore
     )
     
     print("Outputting model...")
@@ -176,7 +183,7 @@ def train(
     print(history.history["val_loss"])
     print("Confusion matrix: \n", confusion_matrix(test_target, test_preds))# keeps track of training metrics
 
-    with open(name("training_results", "txt"), "w") as results:
+    with open(format_name("training_results", "txt"), "w") as results:
         results.write(output)
         results.flush()
         
@@ -239,14 +246,14 @@ if __name__ == "__main__":
                 batches = [_read_batch(os.path.join(input, entry)) for entry in entries] 
                 ts_len = len(next(iter(batches[0][0].values())))
                 if not all(ts_len == len(next(iter(b[0].values()))) for b in batches):
-                    raise RuntimeError(f"Input series lengths are different! {list(other_len for _, other_len in batches)}")
+                    raise RuntimeError(f"Input series lengths are different!")
                 data = combine_batches(batches)
                 
         except Exception as e:
             raise RuntimeError("Could not read input folder with error:", e) 
     
     train(
-        data=data, 
+        data=data,  # type: ignore
         type=args.type,  
         name=args.name,
         output=output,

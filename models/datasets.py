@@ -1,5 +1,5 @@
 import models
-from models import Dataset
+from models import Column, Dataset
 import os.path
 
 import pandas as pd
@@ -27,7 +27,7 @@ Lisiecki = Dataset.load(
         # "d18O_error" : "error"
     },
     age_scale=1000,
-).transform(models.resample_df)
+)
 
 Scotese = Dataset.load(
     name="Scotese et al. (2021)",
@@ -41,9 +41,9 @@ Scotese = Dataset.load(
         ("South", "Polar <67˚S"): "South Polar Temperature"
     },
     age_scale=1000000,
-).transform(lambda df, features: models.resample_df(df, features, steps=0.5))
+)
 
-_GMST = {
+_GMST: dict[Column, str] = {
     "GMST_05": "5%",
     "GMST_16": "16%",
     "GMST_50": "50%",
@@ -51,7 +51,7 @@ _GMST = {
     "GMST_95": "95%",
 }
 
-_CO2 = {
+_CO2: dict[Column, str] = {
     "CO2_05": "5%",
     "CO2_16": "16%",
     "CO2_50": "50%",
@@ -65,12 +65,14 @@ Judd = Dataset.load(
     age_col="AverageAge",
     feature_cols=_GMST | _CO2,
     age_scale=1000000,    
-).transform(lambda df, features: models.resample_df(df, features, steps=2))
+)
 
-JuddGMST, JuddCO2 = Judd.split({
+_JuddSplit = Judd.split({
     "GMST Confidence": _GMST,
     "CO2 Confidence": _CO2,
-})  
+})
+
+JuddGMST, JuddCO2 = _JuddSplit["GMST Confidence"], _JuddSplit["CO2 Confidence"]
 
 # Foster = Dataset(
 #     name="Foster, G. L., et al. (2017)",

@@ -1,5 +1,5 @@
 import traceback
-from typing import Any, Callable, Generic, Iterable, Self, Sequence, TypeVar
+from typing import Any, Callable, Generic, Iterable, Literal, Self, Sequence, TypeVar, ValuesView
 from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
@@ -9,10 +9,72 @@ import abc
 type Column = str | Sequence[str]
 type FeatureColumns = dict[Column, str] | Sequence[Column]
 
-def resample_df(df: pd.DataFrame, feature_cols: Sequence[Column], steps: float = 1.0) -> pd.DataFrame:
+def interpolate(df: pd.DataFrame) -> pd.DataFrame:
+    step = np.median([y-x for x, y in zip(df.index[:-1], df.index[1:])]) # Get the median distance between consecutive ages
     ages = df.index.to_numpy(dtype=float)
-    new_ages = np.arange(np.ceil(ages.min()), np.floor(ages.max()), steps)
-    return pd.DataFrame({col:np.interp(new_ages, ages, df[col].to_numpy()) for col in feature_cols}, index=new_ages)
+    new_ages = np.arange(np.ceil(ages.min()), np.floor(ages.max()), step)
+    return pd.DataFrame({col:np.interp(new_ages, ages, series) for col, series in df.items()}, index=pd.Index(new_ages, name=df.index.name))
+
+# def interpolate(df: pd.DataFrame, tcrit: float | None) -> pd.DataFrame:
+#     """
+#     Get data prior to the transition
+#     Do linear interpolation to make data equally spaced
+
+#     Input:
+#         df: DataFrame with cols ['Age','Proxy','Transition']
+#     Output:
+#         df_inter: DataFrame of interpolated data prior to transition.
+#             Has cols ['Age','Proxy','Transition']
+#     """
+
+#     # Get points prior to transition
+#     df_prior: pd.DataFrame = df[df.index >= tcrit].copy()
+
+#     # Equally spaced time values with same number of points as original record
+#     t_inter_vals = np.linspace(
+#         df_prior.index[0], df_prior.index[-1], len(df_prior)
+#     )
+#     # Make dataframe for interpolated data
+#     df_inter = pd.DataFrame({df.index.name: t_inter_vals, "Inter": True}).set_index(df.index.name)
+#     # Concatenate with original, and interpolate
+#     df2 = pd.concat([df_prior, df_inter])
+#     df2 = df2.interpolate(method="index")
+
+#     # Extract just the interpolated data
+#     df_inter = df2[df2["Inter"] == True][df.columns]
+
+#     return df_inter
+
+def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussian", "Lowess"] = "Lowess") -> pd.Series:
+    from scipy.ndimage import gaussian_filter
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+    smoothing: np.ndarray
+    match type:
+        case "Gaussian":
+            # Calculate residual (from ewstools)
+            # Standard deviation of kernel given bandwidth
+            # Note that for a Gaussian, quartiles are at +/- 0.675*sigma
+            span = span * len(data) if 0 < span <= 1 else span
+            smoothing = gaussian_filter(data, sigma=(0.25 / 0.675) * span, mode="reflect")
+        case "Lowess":
+            span = span if 0 < span <= 1 else span / len(data)
+            smoothing = lowess(data.to_numpy(), data.index.to_numpy(), frac=span, return_sorted=False)
+    return pd.Series(data.to_numpy() - smoothing, index=data.index, name="residuals")
+
+def space_indices(series: pd.Series, spacing: int) -> list[int]:
+    start = series.index.get_loc(series.first_valid_index())
+    if not isinstance(start, int):
+        return []
+        
+    return np.flip(np.arange(len(series) - 1, start, -spacing)).tolist()
+
+T = TypeVar('T')
+def iter_progress(input: Iterable[T], verbose: bool, desc: str | None) -> Iterable[T]:
+    if verbose:
+        import tqdm
+        return tqdm.tqdm(input, desc=desc, leave=False)
+    else:
+        return input
 
 class Dataset:
     
@@ -27,6 +89,8 @@ class Dataset:
         self.df = df
         self.feature_cols = feature_cols
         self.age_format = age_format
+        
+        df.index.name = "time"
     
     @staticmethod
     def load(
@@ -55,32 +119,34 @@ class Dataset:
     def features(self: Self) -> pd.DataFrame:
         return self.df[self.feature_cols.keys()]
     
-    def feature_names(self: Self) -> Iterable[str]:
+    def feature_names(self: Self) -> ValuesView[str]:
         return self.feature_cols.values()
     
     def feature_name(self: Self, col: Column) -> str:
         return self.feature_cols[col]
     
-    def transform(self: Self, function: Callable[[pd.DataFrame, Iterable[Column]], pd.DataFrame]) -> Self:
+    def transform(self: Self, function: Callable[[pd.DataFrame], pd.DataFrame]) -> Self:
         return self.__class__(
                 name=self.name,
-                df=function(self.df, self.feature_cols.keys()),
+                df=function(self.df),
                 feature_cols=self.feature_cols,
                 age_format=self.age_format
         )
     
-    def split(self: Self, features: dict[str, FeatureColumns]) -> list[Self]:
+    def split(self: Self, features: dict[str, FeatureColumns]) -> dict[str, Self]:
         
         def map(name: str, columns: FeatureColumns) -> Self:
             columns = self._convert_feature_cols(columns)
+            df = self.df[columns.keys()]
+            df.index.name = "time"
             return self.__class__(
                 name=self.name + " " + name,
-                df=self.df[columns.keys()],
+                df=df,
                 feature_cols=columns,
                 age_format=self.age_format
             )
         
-        return [map(feat_name, column) for feat_name, column in features.items()]
+        return {feat_name: map(feat_name, column) for feat_name, column in features.items()}
            
     # Clean up data frame before transforming
     @staticmethod
@@ -112,8 +178,11 @@ class Dataset:
 
         if df_sel.empty:
             raise ValueError("No rows with usable feature values after imputation. Check your data and feature selection.")
+        
+        df_sel = df_sel.set_index(age_col)
+        df_sel.index.name = "time"
 
-        return df_sel.set_index(age_col)
+        return df_sel
     
     @staticmethod
     def _get_age_format(ages: Iterable[Any], age_scale: int):

@@ -1,25 +1,40 @@
 if __name__ == "__main__":
     print("Importing environment...")
     import os
+    import functools
     from models.lstm import LSTMLoader
     from models.datasets import *
 
     import models.lstm.test as test
+    from models.lstm.test import DatasetModel
     
-    lstm = LSTMLoader(get_project_path("bury_models/")).with_args(verbose=True, spacing=5)
+    lstm = LSTMLoader(get_project_path("bury_models/")).with_args(verbose=True, spacing=10)
     
     plot_output = get_project_path("output/plots")
         
     # Run models on datasets
     
+    # lstm_run = functools.partial(lstm.run_with_output, print = False, plot_path = plot_output)
+    
+    # lstm_run([Scotese, JuddGMST, JuddCO2, Lisiecki])
+    
+    JuddAvgs = Judd.split({
+        "Avgs": ["GMST_50", "CO2_50"], 
+    })["Avgs"]
+    
     print("Generating project figures from data...")
     test.load_and_save(
-        metrics_path = get_project_path("env/testing/metrics/"),
-        output = os.path.join(plot_output, "tests/"),
+        path = get_project_path("output/metrics/"),
+        output = os.path.join(plot_output),
         lstm=lstm,
-        models=test.get_or_generate_models(path=get_project_path("env/testing/models/")) +
-            [(tup[0].name, [tup[0]], float(tup[1])) for tup in [
+        models=\
+            test.test_models(set([1500, 500])) +
+            [
                 # Datasets and transition points
-                (Scotese, 250)
-            ]],
+                DatasetModel(Lisiecki, 20, []),
+                DatasetModel(Scotese, 20, [250.0]),
+                DatasetModel(JuddAvgs,5, []),
+            ],
     )
+    
+    

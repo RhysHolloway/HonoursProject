@@ -24,14 +24,16 @@ import pandas as pd
 import concurrent.futures
 from concurrent.futures import Executor, ThreadPoolExecutor
 import scipy.optimize._nonlin as nl
-import scipy.integrate
+from pycont.Types import ContinuationResult 
+from pycont.Stability import rightmost_eig_realpart
 import pycont
-import warnings
 
 from ..lstm import *
+from .. import compute_residuals
 
 class Counts(metaclass = abc.ABCMeta):
     
+    @staticmethod
     def attr(type: BifType) -> str:
         match type:
             case ("HB", True):
@@ -110,34 +112,30 @@ class BifCounts(Counts):
             setattr(self, attr, getattr(self, attr) + other.count(type))
 
     def __add__(self: Self, other: Self) -> Self:
-        new = self.copy()
-        new += other
+        new: Self = self.copy()
+        new += other # type: ignore
         return new
     
     def inc(self, type: BifType):
         attr = Counts.attr(type)
         setattr(self, attr, getattr(self, attr) + 1)
 
-SOLVER_PARAMETERS: Final[dict] = {
-    "tolerance": 1e-8,
-    "hopf_detection": True,
-    "param_min": -5.0,
-    "param_max": 5.0,
-}
-
 type _Simulation = tuple[Sims, BifType]
 type _Simulations = dict[int, _Simulation]
 
 type _ModelOutput = list[_Simulation]
 
+type _2DArray = np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]
 
-def _generate_simulation(
-    # Define convergence threshold
-    conv_thresh = 1e-8, 
+def _gen_model(
+    ts_len: int,
+    bif_max: int,
+    total_counts: _AtomicCounts,
+    pool: Executor,
     # Set a proportion (chosen randomly) of the parameters to zero.
-    sparsity=0.5
-    ) -> tuple[np.ndarray[np.float64], np.ndarray[np.float64], np.float64]:
-    
+    sparsity:float = 0.5
+):
+
     """
     Created on Mon Jul 15 15:24:37 2019
 
@@ -155,126 +153,31 @@ def _generate_simulation(
         
 
     """
-    
-    # Stop when system with convergence found
-    while True:
+   
         
-        # Generate parameters from normal distribution
-        pars = np.random.normal(loc=0,scale=1,size=20)
+    # Generate parameters from normal distribution
+    pars = np.random.normal(loc=0,scale=1,size=20)
 
-        # Select a subset of parameters to be zero.
-        pars[np.random.choice(range(len(pars)),int(len(pars)*sparsity),replace=False)] = 0
-        
-        # Negate high order terms to encourage boundedness of solns
-        pars[6:10] = -abs(pars[6:10])
-        pars[16:20] = -abs(pars[16:20])
-        
-        # Define intial condition (2 dimensional array)
-        s0 = np.random.normal(loc=0,scale=2,size=2)
-        
-        # Define timesteps to evaluate at
-        t = np.arange(0., 100, 0.01)
-        
-        # Define derivative function
-        def f(_t: np.float64, s: np.ndarray[np.float64]):
-            '''
-            s: 2D state vector
-            a: 10D vector of parameters for x dynamics
-            b: 10D vecotr of parameterrs for y dyanmics
-            '''
-            x = s[0]
-            y = s[1]
-            # Polynomial forms up to third order
-            polys = np.array([1,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
-            # Output
-            dydt = np.array([np.dot(pars[:10],polys), np.dot(pars[10:],polys)])
-            
-            return dydt
-        
-        with np.errstate(over="raise", invalid="raise"):
-            try:
-                points = scipy.integrate.odeint(f, s0, t,
-                                        full_output=False,
-                                        hmin=1e-14,
-                                        mxhnil=0, printmessg=False, tfirst=True)
-            except:
-                continue
-        
-        # Put into pandas
-        df_traj = pd.DataFrame(points, index=t, columns=['x','y'])
-        
-        # Does the sysetm blow up?
-        # Does the system contain Nan?
-        # Does the system contain inf?
-        if df_traj.abs().max().max() > 1e3 or df_traj.isna().values.any() or np.isinf(df_traj.values).any():
-            continue
-        
-        # Does the system converge?
-        # Difference between max and min of last 10 data points
-        diff = df_traj.iloc[-10:-1].max() - df_traj.iloc[-10:-1].min()
-        # L2 norm
-        norm = np.sqrt(np.square(diff).sum())
-        if norm > conv_thresh:
-            continue
-        
-        break
+    # Select a subset of parameters to be zero.
+    pars[np.random.choice(range(len(pars)),int(len(pars)*sparsity),replace=False)] = 0
     
-    # If made it this far, system is good for bifurcation continuation
-    # print('System converges - export equilibria and parameter values\n')
-    # Export equilibrim data
-    equi = points[-1]
+    # Negate high order terms to encourage boundedness of solns
+    pars[6:10] = -abs(pars[6:10])
+    pars[16:20] = -abs(pars[16:20])
+    
+    # Define intial condition (2 dimensional array)
+    s0 = np.random.normal(loc=0,scale=2,size=2)
 
-    ## Compute the dominant eigenvalue of this system at equilbrium
-    
-    # Compute the Jacobian at the equilibrium
-    x, y =equi
-    [a1,a2,a3,a4,a5,a6,a7,a8,a9,a10]=pars[:10]
-    [b1,b2,b3,b4,b5,b6,b7,b8,b9,b10]=pars[10:]
-    
-    # df/dx
-    j11 = a2 + 2*a4*x + a5*y + 3*a7*x**2 + 2*a8*x*y + a9*y**2
-    # df/dy
-    j12 = a3 + 2*a6*y + a5*x + 3*a10*y**2 + 2*a9*x*y + a8*x**2
-    # dg/dx
-    j21 = b2 + 2*b4*x + b5*y + 3*b7*x**2 + 2*b8*x*y + b9*y**2
-    # dg/dy
-    j22 = b3 + 2*b6*y + b5*x + 3*b10*y**2 + 2*b9*x*y + b8*x**2
-
-    # Assign component to Jacobian
-    jac = np.array([[j11,j12],[j21,j22]])
-    
-    # Compute eigenvalues
-    evals = np.linalg.eigvals(jac)
-    
-    # Compute the real part of the dominant eigenvalue (smallest magnitude)
-    rrate: np.float64 = abs(max(lam.real for lam in evals))
-
-    return (pars, equi, rrate)
-
-def _gen_model(
-    ts_len: int,
-    bif_max: int,
-    total_counts: _AtomicCounts,
-    pool: Executor,
-):
-    
-    with warnings.catch_warnings(action="ignore", category=scipy.integrate.ODEintWarning):
-        pars, equi, rrate = _generate_simulation()
-    
-    model_counts = _AtomicCounts()
-    
     # Multithread the parameter simuations
     tasks = [
         pool.submit(
             _simulate, 
             par, 
             pars, 
-            equi, 
-            rrate, 
+            s0, 
             ts_len, 
             bif_max, 
-            total_counts, 
-            model_counts
+            total_counts
         ) for par in range(len(pars)) if pars[par] != 0.0
     ]
 
@@ -299,15 +202,23 @@ def _gen_model(
     for task in tasks:
         task.cancel()
 
+ 
+SOLVER_PARAMETERS: Final[dict[str, Any]] = {
+    "tolerance": 1e-8,
+    "hopf_detection": True,
+    "param_min": -5.0,
+    "param_max": 5.0,
+}
+
 def _gen_branches_py(
         par: int,
-        pars: np.ndarray[np.float64],
-        equi: np.ndarray[np.float64],
-        steps: int = 500,
-    ) -> list[tuple[BifId, float]]:
+        pars: _2DArray,
+        s0: _2DArray,
+        steps: int = 1000,
+    ) -> list[dict[str, Any]]:
     pars = pars.copy()
     
-    def G(u: np.ndarray[np.float64], p: np.float64):
+    def G(u: np.ndarray, p: float):
         pars[par] = p
         
         x, y = u
@@ -321,19 +232,27 @@ def _gen_branches_py(
         return np.array([f1, f2])
        
     with np.errstate(invalid='ignore'):
-        cont = pycont.arclengthContinuation(
-            G=G, u0=equi, p0=pars[par],
+        cont: ContinuationResult = pycont.arclengthContinuation(
+            G=G, u0=s0, p0=pars[par],
             ds_0=1e-02, ds_min=1e-03, ds_max=1e-01,
             n_steps=steps,
             solver_parameters=SOLVER_PARAMETERS,
             verbosity=pycont.Verbosity.OFF,
         )
 
-    return [(branch.termination_event.kind, branch.termination_event.p) for branch in cont.branches if branch.termination_event is not None and branch.termination_event.kind in BIFS]      
+    return [
+        {
+            "kind": branch.termination_event.kind,
+            "s0": branch.u_path[len(branch.u_path) // 2],
+            "crit": branch.termination_event.p,
+            "rrate": abs(rightmost_eig_realpart(G, branch.termination_event.u, branch.termination_event.p, SOLVER_PARAMETERS))
+        }
+        for branch in cont.branches if branch.termination_event is not None and branch.stable is not False and branch.termination_event.kind in BIFS
+    ]      
 
-def _sim_func(pars: np.ndarray[np.float64], par: int):
+def _sim_func(pars: _2DArray, par: int):
     pars = pars.copy()
-    def de_fun(s: np.ndarray[np.float64], value: float) -> np.ndarray[np.float64]:
+    def de_fun(s: _2DArray, value: float) -> _2DArray:
             pars[par] = value
             '''
             Input:
@@ -346,12 +265,11 @@ def _sim_func(pars: np.ndarray[np.float64], par: int):
             '''
             
             # Polynomial forms up to third order
-            x: np.float64=s[0]
-            y: np.float64=s[1]
-            polys: np.ndarray[np.float64] = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
+            x, y = s
+            polys = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
 
-            dxdt: np.float64 = np.dot(pars[10:], polys)
-            dydt: np.float64 = np.dot(pars[:10], polys)
+            dxdt = np.dot(pars[10:], polys)
+            dydt = np.dot(pars[:10], polys)
                         
             return np.array([dxdt, dydt])
         
@@ -359,13 +277,11 @@ def _sim_func(pars: np.ndarray[np.float64], par: int):
 
 def _simulate(
         par: int,
-        pars: np.ndarray[np.float64],
-        equi: np.ndarray[np.float64],
-        rrate: np.float64,
+        pars: _2DArray,
+        s0: _2DArray,
         ts_len: int,
         bif_max: int,
-        total_counts: _AtomicCounts,
-        model_counts: _AtomicCounts,
+        total_counts: _AtomicCounts
     ) -> _ModelOutput:
     
     """
@@ -383,15 +299,6 @@ def _simulate(
 
     # Noise amplitude
     sigma_tilde = 0.01
-        
-    #-------------------
-    ## Simulate models
-    #------------------
-        
-    # Construct noise as in Methods
-    rv_tri = np.random.triangular(0.75,1,1.25)
-    # rv_tri = 1 # temporary
-    sigma = np.sqrt(2*rrate) * sigma_tilde * rv_tri
 
     # Only simulate bifurcation types that have count below bif_max
     sims: _ModelOutput = []
@@ -401,18 +308,27 @@ def _simulate(
     # to increase the chance that we can extract ts_len data points prior to a transition
     # (transition can occur before the bifurcation is reached)
     series_len = ts_len + 200
+    
+    null_run = False
         
-    for type, value in _gen_branches_py(par, pars, equi):
-        for null in [False, True]:    
+    for vals in _gen_branches_py(par, pars, s0):
+             
+        #-------------------
+        ## Simulate models
+        #------------------
             
-            bif_type: BifType = (type, null)
+        # Construct noise as in Methods
+        rv_tri = np.random.triangular(0.75,1,1.25)
+        # rv_tri = 1 # temporary
+        sigma = np.sqrt(2*vals["rrate"]) * sigma_tilde * rv_tri
+        
+        for null in [False, True] if not null_run else [True]:
             
-            if (
-                total_counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max) and
-                (model_counts.null_count() if null else model_counts.count(bif_type)) == 0 # Has this model not ran this (or another null sim if null) simulation yet
-            ):
-                binit=pars[par]
-                bcrit=value
+            bif_type: BifType = (vals["kind"], null)
+            
+            if total_counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max):
+                b_start=pars[par]
+                b_end=vals["crit"]
                 
                 null_location=0.0 if null else None
                 
@@ -420,40 +336,40 @@ def _simulate(
                 if null_location is not None:
                     assert 0.0 <= null_location and null_location <= 1.0
                     # Set binit and bcrit for simulation as equal to b_null
-                    binit += null_location*(bcrit-binit)
-                    bcrit = binit
+                    b_start += null_location*(b_end-b_start)
+                    b_end = b_start
                 
                 # Pick sample spacing randomly from [0.1,0.2,...,1]
                 dt_sample = np.random.choice(np.arange(1,11)/10)
                 
                 simulator = StochSim(
-                    binit=binit, 
-                    bcrit=bcrit, 
-                    ts_len=series_len,
+                    b_start=b_start, 
+                    b_end=b_end, 
+                    t_end=series_len,
                     dt_sample=dt_sample,
                 )
                 
                 sim = simulator.simulate(
                     de_fun=_sim_func(pars, par),
-                    s0=equi, 
+                    s0=vals["s0"], 
                     sigma=sigma,
                 )['p0']
                 
                 # Get the last non-NaN index
-                t_nan = sim.last_valid_index()
+                t_nan: Any = sim.last_valid_index()
                 if t_nan is None or t_nan < ts_len:
                     continue
                 
                 # Detect a jump to another state (in time-series prior to infinity jump)
                 # Break points - higher penalty means less likely to detect jumps, get first jump
-                t_jump = ruptures.Window(width=10, model="l2", jump=1, min_size=2).fit(
+                t_jump: int = ruptures.Window(width=10, model="l2", jump=1, min_size=2).fit(
                     compute_residuals(sim.iloc[:t_nan], span = 0.2).to_numpy().T
-                ).predict(pen=1, n_bkps=1)[0] - 1
+                ).predict(pen=1, n_bkps=1)[0] - 1 # type: ignore
                 
                 # Output minimum of tnan or tjump
                 transit_time = min(t_nan,t_jump)
                 
-                if transit_time > ts_len and (not null or model_counts.null_count() == 0) and model_counts._get(bif_type).cmpxchg_strong(0, 1).success:
+                if transit_time > ts_len:
                     sim = sim.iloc[-ts_len:]
                     # Have time-series start at time t=0
                     sim.index -= sim.index[0]
@@ -463,6 +379,10 @@ def _simulate(
                         # Label
                         bif_type,
                     ))
+                    
+                    if not null_run and null:
+                        null_run = True
+                        break
     
                 
     return sims
@@ -470,13 +390,13 @@ def _simulate(
 def _create_groups(
     df_labels: pd.DataFrame,
     bif_max: int,
-    validation_percentage = 0.04,
-    test_percentage = 0.01,    
+    validation_percentage: float = 0.04,
+    test_percentage: float = 0.01,    
 ) -> Groups:
     for type in bif_types():
         max = bif_maximum(type=type, bif_max=bif_max)
         matches = df_labels[["bif", "null"]].eq(type).all(axis=1)
-        df_labels = df_labels.drop(df_labels.index[matches & (matches.cumsum() > max)])
+        df_labels = df_labels.drop(df_labels.index[matches & (matches.astype(int).cumsum() > max)])
 
     #----------------------------
     # Create groups file in ratio for training:validation:testing
@@ -499,7 +419,7 @@ def _create_groups(
         assert bif_max == len(classifier)
         return pd.Series(group_nums, index=classifier.index, name = "dataset_ID")
     
-    return pd.concat((to_group(classifier) for _, classifier in df_labels.groupby('class_label')), sort=True)
+    return pd.concat((to_group(classifier) for _, classifier in df_labels.groupby('class_label')), sort=True).to_frame()
 
 ################################################################################
 
@@ -548,12 +468,12 @@ def batch(
                 biftype: BifType = (bif, null)
                 if counts.count(biftype) < bif_maximum(biftype, bif_max):
                     
-                    sim = pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv"))
+                    sim = pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv"))[0]
                     
                     if len(sim) != ts_len:
                         raise RuntimeError(f"Batch {batch_num} loaded simulation {seq_id} with non-matching length {len(sim)}! (expected {ts_len})")
                     
-                    simulations[seq_id] = (sim, (bif, null))
+                    simulations[seq_id] = (sim, biftype)
                     counts.inc(biftype)
                           
             label_file = open(labels_path, "a+")
@@ -568,7 +488,7 @@ def batch(
     pool = ThreadPoolExecutor()
     
     while counts < bif_max:
-        added = set()
+        added: set[BifType] = set()
         
         for results in _gen_model(
             ts_len=ts_len,
@@ -582,7 +502,7 @@ def batch(
                     simulations[current] = result
                     counts.inc(biftype)
                     added.add(biftype)
-                    if label_file is not None:
+                    if label_file is not None and path is not None:
                         result[0].to_csv(os.path.join(path, f"sims/tseries{current}.csv"))
                         label_file.write(f"{current},{_num_from_label(biftype)},{biftype[0]},{biftype[1]}\n")
                     current += 1
@@ -657,7 +577,7 @@ def run_with_args(
     class SelectOutput():
         out = sys.stdout
 
-        def write(self, text):
+        def write(self, text: Any):
             if threading.current_thread().name == "printer":
                 self.out.write(text)
 
