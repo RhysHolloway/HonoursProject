@@ -45,7 +45,7 @@ class TestModel(metaclass = abc.ABCMeta):
             if path is None:
                 raise
             
-            df = pd.read_csv(os.path.join(path, self.name + "_sims.csv"), index_col=__class__.INDICES)["residuals"]
+            df = pd.read_csv(os.path.join(path, self.name + "_resids.csv"), index_col=__class__.INDICES)["residuals"]
             
             if not checks(df):
                 raise
@@ -56,7 +56,7 @@ class TestModel(metaclass = abc.ABCMeta):
         
     def save(self: Self, series: pd.Series, path: str | None = None):
         if path is not None:
-            series.to_csv(os.path.join(path, self.name + "_sims.csv")) 
+            series.to_csv(os.path.join(path, self.name + "_resids.csv")) 
 
 class SimModel(TestModel):
     
@@ -321,28 +321,45 @@ class DatasetModel(TestModel):
             
     
 def roc(
+    variable,
+    name: str,
+    length: int,
     df: pd.DataFrame, 
     lstm: LSTM | None = None,
     bifurcation: Literal["All", "Hopf", "Fold", "Branch"] = "All",
+    path: str | None = None,
 ) -> pd.DataFrame:
+    
+    LEVELS = ["i", "name", "transition", "variable", "early"]
+                
+    if path is not None:
+        roc_path = os.path.join(path, f"{name}_{variable}_len{length}_roc.csv")
+        os.makedirs(os.path.dirname(path), exist_ok=True) # type: ignore
+        try:
+            return pd.read_csv(roc_path, index_col=LEVELS)
+        except:
+            pass
 
     def predictions(df: pd.DataFrame, early: bool) -> pd.DataFrame:
         
         # Time interval relative to transition point for where to make predictions
         # as proportion of dataset
         INTERVAL = np.array([0.6, 0.8]) if early else np.array([0.8, 1])
+        
+        df = df.reorder_levels(TestModel.INDICES)
+            
+        transitions = df[df.index.get_level_values("forced").to_numpy()].reset_index().groupby("tsid")["time"].max()
             
         def per_var(series: pd.Series, name: str):
-            series = series.dropna().to_frame().reorder_levels(TestModel.INDICES)[series.name]
-            
-            transitions = series[series.index.get_level_values("forced").to_numpy()].reset_index().groupby("tsid")["time"].max()
+            series = series.dropna()
             
             list_df = []
             
             for transition in transitions.unique():
                 forced_tsids: pd.Index = transitions[transitions == transition].index
                 forced_series = series.loc[pd.IndexSlice[:, True, forced_tsids, :]]
-                null_series = series[~series.index.get_level_values("forced").to_numpy()].groupby("tsid").filter(lambda s: s.index.get_level_values("time").max() >= transition)
+                null_transition = forced_series.index.get_level_values("time").max()
+                null_series = series[~series.index.get_level_values("forced").to_numpy()].groupby("tsid").filter(lambda s: s.index.get_level_values("time").max() >= null_transition)
                 trans_series = pd.concat([forced_series, null_series])
                 time = trans_series.index.get_level_values("time")
                 t_start = time[0]
@@ -382,7 +399,13 @@ def roc(
 
         return preds.set_index(pd.Series([early] * len(preds), name = "early"), append=True)
     
-    return pd.concat([predictions(df, early=True), predictions(df, early=False)])
+    df = pd.concat([predictions(df, early=True), predictions(df, early=False)])
+    df = df.set_index(pd.Series([variable] * len(df), name = "variable"), append = True).reorder_levels(LEVELS)
+    
+    if path is not None:
+        df.to_csv(roc_path) # type: ignore
+    
+    return df
 
 def counts(df: pd.DataFrame) -> pd.DataFrame:
     if set(LSTM.COLUMNS).issubset(df.columns):
@@ -452,27 +475,14 @@ def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = N
         list_df = []
         for variable, df_var in df.groupby("variable"):
             
-            LEVELS = ["i", "name", "transition", "variable", "early"]
-            
-            if path is not None:
-                roc_path = os.path.join(path, f"{model.name}_{variable}_len{length}_roc.csv")
-                os.makedirs(os.path.dirname(path), exist_ok=True) # type: ignore
-                try:
-                    list_df.append(pd.read_csv(roc_path, index_col=LEVELS))
-                    continue
-                except:
-                    pass
-                
             roc_df = roc(
-                df_var,
-                lstm,
+                variable=variable,
+                name=model.name,
+                length=length,
+                df=df_var,
+                lstm=lstm,
             )
-            
-            roc_df = roc_df.set_index(pd.Series([variable] * len(roc_df), name = "variable"), append = True).reorder_levels(LEVELS)
-            
-            if path is not None:
-                roc_df.to_csv(roc_path) # type: ignore
-                
+                    
             list_df.append(roc_df)
         return pd.concat(list_df)
     
