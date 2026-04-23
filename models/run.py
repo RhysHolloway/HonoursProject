@@ -31,9 +31,9 @@ if __name__ == "__main__":
             test.test_models(set([1500, 500])) +
             [
                 # Datasets and transition points
-                DatasetModel(Lisiecki, 20, []),
-                DatasetModel(Scotese, 20, [250.0]),
-                DatasetModel(JuddAvgs,5, []),
+                # DatasetModel(Lisiecki,  20, []),
+                DatasetModel(Scotese,   0.2, [250.0]),
+                DatasetModel(JuddAvgs,  5,  [250.0]),
             ],
     )
     

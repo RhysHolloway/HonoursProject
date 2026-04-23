@@ -27,20 +27,22 @@ class Metrics(Model[pd.DataFrame]):
 
     # Compute kendall tau values at equally spaced time points
     @staticmethod
-    def ktau(series: pd.Series, spacing: int) -> pd.Series:        
+    def ktau(series: pd.Series, indices: Sequence[int]) -> pd.Series:        
         # Get first non-NaN index in series
-        indices = space_indices(series, spacing)
         if len(indices) == 0:
             return pd.Series(name = f"ktau_{series.name}")
-        start = indices.pop(0)
+        start = indices[0]
+        indices = indices[1:]
+        
+        series = series.reset_index("time").set_index("time")[series.name]
         
         def compute(imax: int) -> float:
-            s = series.iloc[start:imax]
-            import warnings
-            with warnings.catch_warnings(action="ignore", category=SmallSampleWarning):
-                return scipy.stats.kendalltau(s.index.to_numpy(), s.to_numpy())[0] # type: ignore
-        # Return series
-        return pd.Series(map(compute, indices), index=series.index[indices], name = f"ktau_{series.name}")
+            part = series.iloc[start:imax]
+            return scipy.stats.kendalltau(part.index, part).statistic # type: ignore
+            
+        import warnings
+        with warnings.catch_warnings(action="ignore", category=SmallSampleWarning):
+            return pd.Series(map(compute, indices), index=series.index[indices], name = f"ktau_{series.name}")
     
     @staticmethod
     def window_index(series: pd.Series, window: float) -> int:
@@ -50,21 +52,15 @@ class Metrics(Model[pd.DataFrame]):
     
     @staticmethod
     def variance(rolling: pd.api.typing.Rolling) -> pd.Series:
-        var: pd.Series = rolling.var()
-        var.name = "variance"
-        return var
+        return pd.Series(rolling.var(), name = "variance")
         
     @staticmethod
     def std(rolling: pd.api.typing.Rolling) -> pd.Series:
-        var: pd.Series = rolling.std()
-        var.name = "std"
-        return var
+        return pd.Series(rolling.std(), name = "std")
         
     @staticmethod
     def ac1(rolling: pd.api.typing.Rolling) -> pd.Series:
-        auto: pd.Series = rolling.apply(func=lambda x: pd.Series(x).autocorr(lag=1), raw=True)
-        auto.name = "ac1"
-        return auto
+        return pd.Series(rolling.apply(func=lambda x: pd.Series(x).autocorr(lag=1), raw=True), name = "ac1")
     
     def run_on_series(self: Self, series: pd.Series, transition: int | None = None, ktau_distance: int | None = None, window: float | None = None) -> pd.DataFrame:
         
@@ -90,7 +86,9 @@ class Metrics(Model[pd.DataFrame]):
         
         if ktau_distance:
             for col in ["variance", "ac1"]:
-                df["ktau_" + col] = self.ktau(df[col], spacing=ktau_distance)
+                series = df[col]
+                spacing = space_indices(series, ktau_distance)
+                df["ktau_" + col] = self.ktau(series, indices=spacing)
             
         # df.insert(0, "variable", [series.name] * len(df))
 

@@ -50,7 +50,7 @@ class LSTMLoader:
             return []
         # Get the model with the closest input length lower or equal to the input series length (or else get the model with the lowest input length if none can be found)
         ts_len = next((ts_len for ts_len in self.models.keys() if ts_len >= length), next(iter(self.models.keys())))
-        # print("Getting models for", ts_len)
+        print("Getting models for", ts_len, "for series of length", length)
         return self.models[ts_len]
 
 type LSTMPeaks = dict[Column | None, dict[str, np.ndarray]]
@@ -77,26 +77,28 @@ class LSTM(Model[pd.DataFrame]):
         self: Self,
         series: pd.Series,
         parallel: Parallel,
-        spacing: int | None = None,
+        indices: Sequence[int] | None = None,
     ) -> pd.DataFrame:
-        if spacing is None:
-            spacing = self.spacing
         
         models = self.get_models(len(series))
         if len(models) == 0:
             raise ValueError(f"No LSTM models were found to be used with {series.name}!")
         
-        indices = space_indices(series, spacing)
+        if indices is None:
+            indices = list(range(len(series)))[::self.spacing]
+        
         if len(indices) == 0:
             return pd.DataFrame(columns=LSTM.COLUMNS + ["time"]).set_index("time")
-        start = indices.pop(0)
+        
+        start = indices[0]
+        indices = indices[1:]
                 
         def compute(tsid: int, imax: int) -> pd.DataFrame:
             model = models[tsid]
             input = series.iloc[start:imax]
             if len(input) == 0:
                 return pd.DataFrame(columns=self.COLUMNS + ["tsid", "time"]).set_index(["tsid", "time"])
-            time = input.index[-1]
+            time = input.index.get_level_values("time")[-1]
             input = input.to_numpy()
             input = input / np.mean(np.abs(input))
             
@@ -188,8 +190,8 @@ class LSTM(Model[pd.DataFrame]):
         def compute(feature: Column) -> pd.DataFrame:
             residuals = compute_residuals(dataset.df[feature])[::-1] # type: ignore
             df = self.run_on_series(residuals, parallel=parallel)
-            df.insert(0, "variable", [feature] * len(df))
-            return df
+            df["variable"] = np.array([feature] * len(df))
+            return df.set_index("variable", append=True)
         
         self.results[dataset] = pd.concat(map(compute, dataset.feature_cols.keys()))
 

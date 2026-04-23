@@ -10,45 +10,16 @@ type Column = str | Sequence[str]
 type FeatureColumns = dict[Column, str] | Sequence[Column]
 
 def interpolate(df: pd.DataFrame) -> pd.DataFrame:
-    step = np.median([y-x for x, y in zip(df.index[:-1], df.index[1:])]) # Get the median distance between consecutive ages
+    step = np.ceil(np.min([y-x for x, y in zip(df.index[:-1], df.index[1:])])) # Get the min distance between consecutive ages
     ages = df.index.to_numpy(dtype=float)
     new_ages = np.arange(np.ceil(ages.min()), np.floor(ages.max()), step)
     return pd.DataFrame({col:np.interp(new_ages, ages, series) for col, series in df.items()}, index=pd.Index(new_ages, name=df.index.name))
-
-# def interpolate(df: pd.DataFrame, tcrit: float | None) -> pd.DataFrame:
-#     """
-#     Get data prior to the transition
-#     Do linear interpolation to make data equally spaced
-
-#     Input:
-#         df: DataFrame with cols ['Age','Proxy','Transition']
-#     Output:
-#         df_inter: DataFrame of interpolated data prior to transition.
-#             Has cols ['Age','Proxy','Transition']
-#     """
-
-#     # Get points prior to transition
-#     df_prior: pd.DataFrame = df[df.index >= tcrit].copy()
-
-#     # Equally spaced time values with same number of points as original record
-#     t_inter_vals = np.linspace(
-#         df_prior.index[0], df_prior.index[-1], len(df_prior)
-#     )
-#     # Make dataframe for interpolated data
-#     df_inter = pd.DataFrame({df.index.name: t_inter_vals, "Inter": True}).set_index(df.index.name)
-#     # Concatenate with original, and interpolate
-#     df2 = pd.concat([df_prior, df_inter])
-#     df2 = df2.interpolate(method="index")
-
-#     # Extract just the interpolated data
-#     df_inter = df2[df2["Inter"] == True][df.columns]
-
-#     return df_inter
 
 def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussian", "Lowess"] = "Lowess") -> pd.Series:
     from scipy.ndimage import gaussian_filter
     from statsmodels.nonparametric.smoothers_lowess import lowess
     smoothing: np.ndarray
+    data = pd.Series(data, index=data.index.get_level_values("time"))
     match type:
         case "Gaussian":
             # Calculate residual (from ewstools)
@@ -62,7 +33,10 @@ def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussia
     return pd.Series(data.to_numpy() - smoothing, index=data.index, name="residuals")
 
 def space_indices(series: pd.Series, spacing: int) -> list[int]:
-    start = series.index.get_loc(series.first_valid_index())
+    first = series.first_valid_index()
+    if first is None:
+        return []
+    start = series.index.get_loc(first)
     if not isinstance(start, int):
         return []
         
