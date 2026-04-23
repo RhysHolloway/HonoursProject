@@ -58,6 +58,8 @@ class TestModel(metaclass = abc.ABCMeta):
         try:
             df = pd.read_csv(os.path.join(path, self.name, file), index_col=indices)[columns]
             return checks(df)
+        except FileNotFoundError:
+            return None
         except:
             import traceback
             traceback.print_exc(limit = 0)
@@ -259,10 +261,20 @@ class CrHopf(CrModel):
         
 class DatasetModel(TestModel):
     
-    def __init__(self: Self, dataset: Dataset, bandwidth: int | float, tcrit: Iterable[float] = []):
-        super().__init__(name=dataset.name, spacing=max(1, abs(int(dataset.df.index[-1] - dataset.df.index[0])) // 250), age=dataset.age_format)
+    def __init__(
+        self: Self,
+        dataset: Dataset,
+        bandwidth: int | float,
+        tcrit: Iterable[float] = (),
+        spacing: int | None = None,
+    ):
+        super().__init__(
+            name=dataset.name,
+            spacing=spacing if spacing is not None else max(1, abs(int(dataset.df.index[-1] - dataset.df.index[0])) // 250),
+            age=Dataset.age_format(dataset.df.index),
+        )
         self.bandwidth = float(bandwidth)
-        self.df = dataset.df.rename(dataset.feature_cols, axis=1)
+        self.df = dataset.df
         self.tcrit = set(t for t in tcrit if 0 <= t <= self.df.index.max())
         if len(self.tcrit) == 0:
             raise ValueError("A tipping point must be provided to test dataset", dataset.name)
@@ -519,21 +531,26 @@ def plot_metrics(model: TestModel, kind: str, metrics: pd.DataFrame, rocs: pd.Da
     if lstm is not None:
         for (variable, forced), df in metrics.groupby(["variable", "forced"], dropna=False):
                 
-            fig = lstm.plot(
+            lstm_fig = lstm.plot(
                 name = model.name,
                 means = lstm.calc_means(df),
                 age = model.age,
                 reverse = False,
             )
             
-            fig.suptitle(f"{lstm.name} {model.name} {"forced" if forced else "null"} bifurcation classifcation on {variable} {kind}")
+            lstm_fig.suptitle(f"{lstm.name} {model.name} {"forced" if forced else "null"} bifurcation classifcation on {variable} {kind}")
+            
+            metrics_fig = Metrics.plot(df, model.name)
+            metrics_fig.suptitle(f"{model.name} {variable} {kind} metrics")
             
             if output is not None:
                 path = os.path.join(output, model.name)
                 os.makedirs(path, exist_ok=True)
-                fig.savefig(os.path.join(path, fig.get_suptitle() + ".png"))
+                for fig in [lstm_fig, metrics_fig]:
+                    fig.savefig(os.path.join(path, fig.get_suptitle() + ".png"))
             else:
-                fig.show()
+                for fig in [lstm_fig, metrics_fig]:
+                    fig.show()
                 
             plt.close()
     

@@ -74,16 +74,81 @@ _JuddSplit = Judd.split({
 
 JuddGMST, JuddCO2 = _JuddSplit["GMST Confidence"], _JuddSplit["CO2 Confidence"]
 
-# Foster = Dataset(
-#     name="Foster, G. L., et al. (2017)",
-#     df=lambda: pd.read_excel(data_path("41467_2017_BFncomms14845_MOESM2874_ESM.xlsx"), sheet_name="proxies", header=[1,2,3]),
-#     age_col=('Age', '(Ma)'),
-#     feature_cols=[
-#         'Î´13c_permille', 'select_d13c_permille', 
-#         'sauerstof_isotop_permille', 
-#         'select_d18o_permille (arag-0.6)', 
-#         "T (-1.08‰) arag, bel corr"
-#     ],
-#     transform=lambda df, age_col, feature_cols: resample_df(df, age_col, feature_cols, steps=2),
-#     age_scale=1000000,
-# )
+BuryEndGreenhouseEarth = Dataset.load(
+    name="Bury paleoclimate - End of greenhouse Earth",
+    df=lambda: pd.read_csv(data_path("bury_paleoclimate/tripati2005/tripati2005_select.csv"), encoding="utf-8-sig"),
+    age_col="Age",
+    feature_cols={"CaCO3": "CaCO3 (%)"},
+    age_scale=1_000_000
+).age_range(32_000_000, 40_000_000)
+
+BuryBollingAllerod = Dataset.load(
+    name="Bury paleoclimate - Bolling-Allerod transition",
+    df=lambda: pd.read_csv(
+        data_path("bury_paleoclimate/gisp2/gisp2_temp_accum_alley2000.txt"),
+        header=0,
+        names=["Age", "Temperature", "NA"],
+        sep=r"\s+",
+        nrows=1632,
+    ),
+    age_col="Age",
+    feature_cols={"Temperature": "Temperature (C)"},
+    age_scale=1000,
+).age_range(14_600, 21_000)
+
+BuryEndYoungerDryas = Dataset.load(
+    name="Bury paleoclimate - End of Younger Dryas",
+    df=lambda: pd.read_csv(
+        data_path("bury_paleoclimate/cariaco2000/cariaco2000_pc56_greyscale.txt"),
+        header=1,
+        names=["Age", "Grayscale"],
+        sep=r"\s+",
+    ),
+    age_col="Age",
+    feature_cols={"Grayscale": "Grayscale (0-255)"},
+).age_range(11_200, 12_500)
+
+BuryDesertificationNorthAfrica = Dataset.load(
+    name="Bury paleoclimate - Desertification of N. Africa",
+    df=lambda: pd.read_csv(data_path("bury_paleoclimate/demenocal2000/658C.terr.2.1.interp.csv"), encoding="utf-8-sig"),
+    age_col="Age(cal. yr BP)",
+    feature_cols={"terr% (interp)": "Terrigenous dust (%)"},
+).age_range(4800, 8300)
+
+_BuryDeutnat = Dataset.load(
+    name="Petit, J.R., et al., 2001",
+    df=lambda: pd.read_csv(
+        data_path("bury_paleoclimate/deutnat/deutnat.txt"),
+        sep=r"\s+",
+        encoding="latin1",
+        names=["i", "Age", "d2H", "deltaTS"],
+        skiprows=range(0, 111),
+    ),
+    age_col="Age",
+    feature_cols={"d2H": "d2H (%)"}
+)
+
+BuryEndGlaciationI = _BuryDeutnat.age_range(12_000, 58_000)
+BuryEndGlaciationI.name = "Bury paleoclimate - End of glaciation I"
+
+BuryEndGlaciationII = _BuryDeutnat.age_range(128_000, 151_000)
+BuryEndGlaciationII.name = "Bury paleoclimate - End of glaciation II"
+
+BuryEndGlaciationIII = _BuryDeutnat.age_range(238_000, 270_000)
+BuryEndGlaciationIII.name = "Bury paleoclimate - End of glaciation III"
+
+BuryEndGlaciationIV = _BuryDeutnat.age_range(324_600, 385_300)
+BuryEndGlaciationIV.name = "Bury paleoclimate - End of glaciation IV"
+
+# Dataset, Gaussian detrending bandwidth, and transition age from the
+# paleoclimate empirical tests in Bury et al.'s PNAS repository.
+BuryPaleoclimate = [
+    (BuryEndGreenhouseEarth, 25, [34_000_000]),
+    (BuryBollingAllerod, 25, [15_000]),
+    (BuryEndYoungerDryas, 100, [11_600]),
+    (BuryDesertificationNorthAfrica, 10, [5700]),
+    (BuryEndGlaciationI, 25, [17_000]),
+    (BuryEndGlaciationII, 25, [135_000]),
+    (BuryEndGlaciationIII, 10, [242_000]),
+    (BuryEndGlaciationIV, 50, [334_100]),
+]

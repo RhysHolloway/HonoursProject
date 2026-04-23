@@ -39,7 +39,8 @@ class LSTMLoader:
         if len(found) == 0:
             raise ValueError(f"Could not load any models from {path}!")
         
-        self.models: Final[OrderedDict[int, list[KerasModel]]] = OrderedDict(sorted(found.items()))
+        self.models: Final[dict[int, list[KerasModel]]] = found
+        self.keys: Final[list[int]] = sorted(self.models.keys())
         
     @property
     def with_args(self: Self):
@@ -49,8 +50,8 @@ class LSTMLoader:
         if length == 0:
             return []
         # Get the model with the closest input length lower or equal to the input series length (or else get the model with the lowest input length if none can be found)
-        ts_len = next((ts_len for ts_len in self.models.keys() if ts_len >= length), next(iter(self.models.keys())))
-        print("Getting models for", ts_len, "for series of length", length)
+        ts_len = min((ts_len for ts_len in self.keys if ts_len >= length), default=self.keys[-1])
+        # print("Getting models for", ts_len, "for series of length", length)
         return self.models[ts_len]
 
 type LSTMPeaks = dict[Column | None, dict[str, np.ndarray]]
@@ -193,7 +194,7 @@ class LSTM(Model[pd.DataFrame]):
             df["variable"] = np.array([feature] * len(df))
             return df.set_index("variable", append=True)
         
-        self.results[dataset] = pd.concat(map(compute, dataset.feature_cols.keys()))
+        self.results[dataset] = pd.concat(map(compute, dataset.df.columns))
 
     def _print(self: Self, dataset: Dataset):
         preds = self.results[dataset]
@@ -261,13 +262,12 @@ class LSTM(Model[pd.DataFrame]):
                 fig.legend(legend)
         
         return fig
-    
 
     def _plot(self: Self, dataset: Dataset) -> Figure:
         return __class__.plot(
             name = dataset.name,
             legend = dataset.feature_names(),
-            age = dataset.age_format,
+            age = Dataset.age_format(dataset.df.index),
             preds = self.results[dataset], 
             means = self.means(dataset), 
             peaks = self.peaks(dataset)

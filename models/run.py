@@ -1,7 +1,6 @@
 if __name__ == "__main__":
     print("Importing environment...")
     import os
-    import functools
     from models.lstm import LSTMLoader
     from models.datasets import *
 
@@ -14,13 +13,7 @@ if __name__ == "__main__":
         
     # Run models on datasets
     
-    # lstm_run = functools.partial(lstm.run_with_output, print = False, plot_path = plot_output)
-    
-    # lstm_run([Scotese, JuddGMST, JuddCO2, Lisiecki])
-    
-    JuddAvgs = Judd.split({
-        "Avgs": ["GMST_50", "CO2_50"], 
-    })["Avgs"]
+    lstm.run_with_output([Lisiecki], path=plot_output)
     
     print("Generating project figures from data...")
     test.load_and_save(
@@ -32,9 +25,11 @@ if __name__ == "__main__":
             [
                 # Datasets and transition points
                 # DatasetModel(Lisiecki,  20, []),
-                DatasetModel(Scotese,   0.2, [250.0]),
-                DatasetModel(JuddAvgs,  5,  [250.0]),
+                # DatasetModel(Scotese,   0.2, [250.0]),
+                # DatasetModel(JuddAvgs,  5,  [250.0]),
+            ] +
+            [
+                DatasetModel(dataset, bandwidth, tcrit, spacing=10)
+                for dataset, bandwidth, tcrit in BuryPaleoclimate
             ],
     )
-    
-    

@@ -56,14 +56,9 @@ class Dataset:
         self: Self,
         name: str, 
         df: pd.DataFrame,
-        feature_cols: dict[Column, str],
-        age_format: str,
     ):
         self.name = name
         self.df = df
-        self.feature_cols = feature_cols
-        self.age_format = age_format
-        
         df.index.name = "time"
     
     @staticmethod
@@ -78,46 +73,43 @@ class Dataset:
         
         feature_cols = __class__._convert_feature_cols(feature_cols)
         
-        loaded_df = __class__._prepare_df(df(), age_col, list(feature_cols.keys()))   
+        loaded_df = __class__._prepare_df(df(), age_col, age_scale, list(feature_cols.keys())).rename(feature_cols, axis=1)
         
         return Dataset(
             name=name,
-            age_format=__class__._get_age_format(loaded_df.index, age_scale),
             df=loaded_df,
-            feature_cols=feature_cols,
         )
     
     def ages(self: Self) -> np.ndarray:
         return self.df.index.to_numpy(copy=False)
     
     def features(self: Self) -> pd.DataFrame:
-        return self.df[self.feature_cols.keys()]
+        return self.df
     
-    def feature_names(self: Self) -> ValuesView[str]:
-        return self.feature_cols.values()
+    def feature_names(self: Self) -> pd.Index[str]:
+        return self.df.columns
     
-    def feature_name(self: Self, col: Column) -> str:
-        return self.feature_cols[col]
-    
-    def transform(self: Self, function: Callable[[pd.DataFrame], pd.DataFrame]) -> Self:
+    def transform(self: Self, function: Callable[[pd.DataFrame], pd.DataFrame], name: str | None = None) -> Self:
         return self.__class__(
-                name=self.name,
-                df=function(self.df),
-                feature_cols=self.feature_cols,
-                age_format=self.age_format
+            name=name or self.name,
+            df=function(self.df),
+        )
+        
+    def age_range(self: Self, min: int | float | None = None, max: int | float | None = None, name: str | None = None) -> Self:
+        return self.__class__(
+            name=name or self.name,
+            df=self.df[(self.df.index <= max) & (self.df.index >= min)],
         )
     
     def split(self: Self, features: dict[str, FeatureColumns]) -> dict[str, Self]:
         
         def map(name: str, columns: FeatureColumns) -> Self:
             columns = self._convert_feature_cols(columns)
-            df = self.df[columns.keys()]
+            df = self.df[columns.keys()].rename(columns, axis=1)
             df.index.name = "time"
             return self.__class__(
                 name=self.name + " " + name,
                 df=df,
-                feature_cols=columns,
-                age_format=self.age_format
             )
         
         return {feat_name: map(feat_name, column) for feat_name, column in features.items()}
@@ -127,12 +119,13 @@ class Dataset:
     def _prepare_df(
         df: pd.DataFrame,
         age_col: Column,
+        age_scale: int | float,
         feature_cols: Sequence[Column],
     ) -> pd.DataFrame:
         
         # Select relevant columns and ensure age is present
-        df_sel: pd.DataFrame = df[[age_col] + list(feature_cols)]
-        df_sel = df_sel.sort_values(by=age_col).reset_index(drop=True).dropna(subset=[age_col])
+        df_sel: pd.DataFrame = df[[age_col] + list(feature_cols)].dropna(subset=[age_col])
+        df_sel[age_col] *= age_scale
 
         if df_sel.empty:
             raise ValueError(f"No rows remain after dropping rows with missing '{age_col}'. Check your data.")
@@ -153,14 +146,14 @@ class Dataset:
         if df_sel.empty:
             raise ValueError("No rows with usable feature values after imputation. Check your data and feature selection.")
         
-        df_sel = df_sel.set_index(age_col)
+        df_sel = df_sel.groupby(age_col, as_index=False).mean(numeric_only=True).set_index(age_col) # type: ignore
         df_sel.index.name = "time"
 
         return df_sel
     
     @staticmethod
-    def _get_age_format(ages: Iterable[Any], age_scale: int):
-        match np.log10(min(age for age in ages if age > 0) * age_scale) // 3:
+    def age_format(ages: Iterable[Any]) -> str:
+        match np.log10(min(age for age in ages if age > 0)) // 3:
             case 0: return "ya"
             case 1: return "kya"
             case 2: return "mya"
@@ -189,7 +182,7 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
     def _plot(self: Self, dataset: Dataset) -> Figure:
         pass
     
-    def run_with_output(self, datasets: Iterable[Dataset], print: bool = True, plot: bool = True, plot_path: str | None = None):
+    def run_with_output(self, datasets: Iterable[Dataset], path: str):
         from builtins import print as println
         
         println(f"###### Running {self.name} on datasets:")
@@ -200,24 +193,13 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
                 self.run(dataset)
                 println(f"### {self.name} completed in {time.strftime("%Hh%Mm%Ss", time.gmtime(time.time() - start))}")
                 println()
-        
-                if print:
-                    println(f"###### {self.name} results for {dataset.name}:")
-                    try:
-                        self._print(dataset)            
-                    except Exception:
-                        println(f"###### {self.name} results for {dataset.name} failed with exception:")
-                        traceback.print_exc()
-                    println()
                 
-                if plot:
-                    try:
-                        fig = self._plot(dataset)
-                        if plot_path is not None:
-                            import os.path
-                            fig.savefig(os.path.join(plot_path, f"{self.name} {dataset.name}.png"))           
-                    except Exception:
-                        traceback.print_exc()
+                try:
+                    fig = self._plot(dataset)
+                    import os.path
+                    fig.savefig(os.path.join(path, f"{self.name} {dataset.name}.png"))
+                except Exception:
+                    traceback.print_exc()
             except Exception:
                 traceback.print_exc()
             

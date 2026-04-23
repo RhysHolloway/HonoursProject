@@ -104,28 +104,25 @@ class Metrics(Model[pd.DataFrame]):
         pass                   
     
     def _plot(self: Self, dataset: Dataset) -> Figure:
-        results = self.results[dataset]
-        ROWS = 5
-        fig = pyplot.figure(figsize=(6 * len(dataset.feature_cols), 3 * ROWS))
-        fig.suptitle(dataset.name)
-        axs: Sequence[Axes] = fig.subplots(nrows=ROWS, ncols=1, sharex = True)
+        return __class__.plot(self.results[dataset], dataset.name)
+    
+    @staticmethod
+    def plot(df: pd.DataFrame, name: str) -> Figure:
+        ROWS = 2
+        fig, axs = pyplot.subplots(nrows=ROWS, ncols=1, sharex = True)
+        fig.suptitle(name)
         
         def plot(data: pd.Series, title: str, i: int):
             axs[i].set_ylabel(title)
             axs[i].invert_xaxis()
-            if i == 0:
-                axs[i].legend(dataset.feature_names())
+            # if i == 0:
+            #     axs[i].legend(dataset.feature_names())
             if i == ROWS - 1:
-                axs[i].set_xlabel(f"Age ({dataset.age_format})")
-            if data is not None:
-                # names = dataset.feature_names()
-                # for j, data in enumerate(data):
-                axs[i].plot(data, data.index, label=title)
+                axs[i].set_xlabel(f"Age ({Dataset.age_format(data.index)})")
+            axs[i].plot(data, data.index, label=title)
                     
-            plot(results["state"], "Data", 0)
-            plot(results["variance"], "Variance", 1)
-            plot(results["ac1"], "AC-1", 2)
-            plot(results["ktau_variance"], "KTau Variance", 3)
-            plot(results["ktau_ac1"], "KTau AC-1", 4)
+        plot(df["variance"], "Variance", 0)
+        plot(df["ac1"], "AC-1", 1)
             
+        fig.tight_layout()
         return fig
