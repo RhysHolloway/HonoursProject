@@ -52,17 +52,22 @@ class TestModel(metaclass = abc.ABCMeta):
         """
         pass
     
-    def load(self: Self, path: str | None, file: str, /, indices: list[str] = INDICES, columns: list[str] = COLUMNS, checks: Callable[[pd.DataFrame], pd.DataFrame | None] = lambda df: df) -> pd.DataFrame | None:
+    def load(self: Self, path: str | None, file: str, /, indices: list[str] = INDICES, columns: list[str] = COLUMNS, checks: Callable[[pd.DataFrame], pd.DataFrame | None] = lambda df: df, time: float | None = None) -> pd.DataFrame | None:
         if path is None:
             return None
         try:
-            df = pd.read_csv(os.path.join(path, self.name, file), index_col=indices)[columns]
+            FILE_PATH = os.path.join(path, self.name, file)
+            if time is not None and os.path.exists(FILE_PATH) and os.path.getmtime(FILE_PATH) < time:
+                return None
+            df = pd.read_csv(FILE_PATH, index_col=indices)[columns]
             return checks(df)
         except FileNotFoundError:
             return None
         except:
             import traceback
+            import sys
             traceback.print_exc(limit = 0)
+            print(f"Error loading {file} for model {self.name} from path {path}.", file=sys.stderr)
             return None
         
     def save(self: Self, path: str | None, file: str, df: pd.Series | pd.DataFrame, /):
@@ -295,7 +300,9 @@ class DatasetModel(TestModel):
         )
         
         # Concatenate with original, interpolate, and extract the interpolated data
-        self.series = pd.concat([prior, df_inter]).infer_objects().interpolate(method="index").dropna(subset="keep")[variable]
+        interpolated = pd.concat([prior, df_inter]).infer_objects()
+        interpolated[variable] = interpolated[variable].interpolate(method="index")
+        self.series = interpolated.dropna(subset="keep")[variable]
         
         self.bandwidth = float(bandwidth)
         self.tcrit = tcrit
@@ -476,7 +483,8 @@ def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = N
     
     parallel = Parallel(return_as="generator_unordered", backend="threading", n_jobs=4)
     cache_sources = [__file__, metrics_module.__file__, lstm_module.__file__]
-    cache_source_mtime = max(
+    
+    MODIFIED_TIME = max(
         os.path.getmtime(source)
         for source in cache_sources
         if source is not None and os.path.exists(source)
@@ -486,20 +494,12 @@ def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = N
         assert pd.api.types.is_integer(tsid)
 
         FILE = f"metrics_{"forced" if forced else "null"}_{kind}_{tsid}.csv"
-        metric_columns = ["variance", "ac1", "ktau_variance", "ktau_ac1"]
-        expected_columns = metric_columns + (LSTM.COLUMNS if lstm is not None else [])
-        cache_file = os.path.join(path, model.name, FILE) if path is not None else None
+        COLUMNS = ["ktau_variance", "ktau_ac1"] + (LSTM.COLUMNS if lstm is not None else [])
         df = df.reset_index(TestModel.INDICES[:-1], drop=True).sort_index()
 
         indices = space_indices(df["residuals"], spacing=10)
 
-        metrics = model.load(path, FILE, columns=expected_columns)
-        if metrics is not None and (
-            (cache_file is not None and os.path.exists(cache_file) and os.path.getmtime(cache_file) < cache_source_mtime)
-            or not metrics.index.is_unique
-            or (lstm is not None and not metrics[LSTM.COLUMNS].notna().all(axis=1).all())
-        ):
-            metrics = None
+        metrics = model.load(path, FILE, columns=COLUMNS, time=MODIFIED_TIME)
         
         if metrics is None:
 

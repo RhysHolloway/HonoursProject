@@ -26,6 +26,8 @@ def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussia
         case "Lowess":
             span = span if 0 < span <= 1 else span / len(data)
             smoothing = lowess(data.to_numpy(), data.index.to_numpy(), frac=span, return_sorted=False)
+        case _:
+            raise ValueError(f"Invalid detrending type: {type}")
     return pd.Series(data.to_numpy() - smoothing, index=data.index, name="residuals")
 
 def space_indices(series: pd.Series, spacing: int) -> list[int]:

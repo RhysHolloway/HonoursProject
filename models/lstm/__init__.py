@@ -96,7 +96,7 @@ class LSTM(Model[pd.DataFrame]):
         name: str = "LSTM",
         spacing: int = 10,
         window: float | int = 0.25,
-        detrend: str = "LOWESS",
+        detrend: str = "Lowess",
         verbose: bool = True,
         jobs: int = 4,
     ):
