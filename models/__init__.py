@@ -99,9 +99,14 @@ class Dataset:
         )
         
     def age_range(self: Self, min: int | float | None = None, max: int | float | None = None, name: str | None = None) -> Self:
+        df = self.df
+        if min is not None:
+            df = df[df.index >= min]
+        if max is not None:
+            df = df[df.index <= max]
         return self.__class__(
             name=name or self.name,
-            df=self.df[(self.df.index <= max) & (self.df.index >= min)],
+            df=df,
         )
     
     def split(self: Self, features: dict[str, FeatureColumns]) -> dict[str, Self]:
@@ -183,10 +188,10 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
         pass
     
     @abc.abstractmethod 
-    def _plot(self: Self, dataset: Dataset) -> Figure:
+    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
         pass
     
-    def run_with_output(self, datasets: Iterable[Dataset], path: str):
+    def run_with_output(self, datasets: Iterable[Dataset], path: str, title: bool = True):
         from builtins import print as println
         
         println(f"###### Running {self.name} on datasets:")
@@ -199,7 +204,7 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
                 println()
                 
                 try:
-                    fig = self._plot(dataset)
+                    fig = self._plot(dataset, title)
                     import os.path
                     fig.savefig(os.path.join(path, f"{self.name} {dataset.name}.png"))
                     plt.close(fig)

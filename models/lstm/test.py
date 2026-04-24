@@ -140,8 +140,8 @@ class SimModel(TestModel):
         df = pd.DataFrame(columns=self.INDICES + __class__.COLUMNS).set_index(self.INDICES) if load is None else load
                 
         remaining = set(itertools.product(range(self.sims), [True, False])).difference(iter(df.groupby(["tsid", "forced"]).groups.keys()))
-        if verbose and len(remaining) != 0:
-            print("Missing simulations", remaining)
+        # if verbose and len(remaining) != 0:
+        #     print("Missing simulations", remaining)
         if len(remaining) > 0:
             
             df: pd.DataFrame = pd.concat(
@@ -179,7 +179,7 @@ class SimModel(TestModel):
         
         if forced:
             tcrit = model.parameter[model.parameter > self.bcrit].index[0]
-            series = series[series.index >= tcrit]
+            series = series[series.index <= tcrit]
             
         df = pd.concat([
                     series.to_frame(name="state"), 
@@ -388,7 +388,7 @@ def roc(
     df: pd.DataFrame, 
     lstm: LSTM | None = None,
     path: str | None = None,
-    bifurcation: Literal["All", "Hopf", "Fold", "Branch"] = "All",
+    bifurcation: Literal["All", "Hopf", "Fold", "Transcritical"] = "All",
 ) -> pd.DataFrame:
     
     LEVELS = ["i", "name", "start", "end"]
@@ -499,7 +499,11 @@ def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = N
 
         indices = space_indices(df["residuals"], spacing=10)
 
-        metrics = model.load(path, FILE, columns=COLUMNS, time=MODIFIED_TIME)
+        metrics = model.load(
+            path, FILE, 
+            columns=COLUMNS, 
+            # time=MODIFIED_TIME,
+        )
         
         if metrics is None:
 
@@ -540,64 +544,77 @@ def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = N
             )) for kind, (sims, df) in metrics_dict.items()}
     
 
-def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.DataFrame, roc: pd.DataFrame, output: str | None = None, lstm: LSTM | None = None):
+def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.DataFrame, roc: pd.DataFrame, output: str, lstm: LSTM | None = None):
     
     groups = roc.groupby(["start", "end"])
-    fig, axes = plt.subplots(figsize=(12,6), nrows=1, ncols=len(groups), squeeze=False)
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=groups.ngroups,
+        figsize=(4.0 * groups.ngroups, 5),
+        squeeze=False,
+        constrained_layout=True,
+    )
     
     axes = axes.flatten()
         
-    for i, ((start, end), roc) in enumerate(groups):
-        axis = axes[i]
+    for axis, ((start, end), roc) in zip(axes, groups):
+        axis: Axes
         
         assert pd.api.types.is_float(start)
         assert pd.api.types.is_float(end)
         
-        for name, roc in roc.groupby("name"):
+        groupby = roc.groupby("name")
+        
+        for name, roc in groupby:
             axis.plot(
                 roc["fpr"],
                 roc["tpr"],
-                label=f"{name} bif (AUC={np.round(roc["auc"].iloc[0], 2)})"
+                label=f"{name}\n(AUC={np.round(roc["auc"].iloc[0], 2)})"
             )
 
-            # Line y=x
-            axis.plot(
-                np.linspace(0, 1, 100),
-                np.linspace(0, 1, 100),
-                color="black", 
-                linestyle="dashed",
-            )
+        # Line y=x
+        axis.plot(
+            [0,1],
+            [0,1],
+            color="black", 
+            linestyle="dashed",
+        )
 
-            axis.set_xlabel("False positive rate")
-            axis.set_xbound(-0.01, 1)
-            axis.set_ylabel("True positive rate") 
-            
-            axis.set_title(f"Window of {start * 100}% - {end * 100}% of data)")
-
-    for ax in axes:
-        ax.legend()
-    
-    fig.suptitle(f"ROC {model.name} {kind}")
+        axis.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.14),
+            ncol=groupby.ngroups,
+            fancybox=True,
+            shadow=True,
+            fontsize="small",
+        ) 
+        axis.set_xlabel("False positive rate")
+        axis.set_xbound(-0.01, 1)
+        axis.set_ylabel("True positive rate") 
+        axis.set_aspect('equal', adjustable='box')
+        axis.set_title(f"Window of {start * 100}% - {end * 100}% of data)")
+                   
+    # fig.suptitle()
+    # fig.tight_layout()
     
     if output is not None:
-        path = os.path.join(output, model.name)
-        os.makedirs(path, exist_ok=True)
-        fig.savefig(os.path.join(path, fig.get_suptitle() + ".png"))
+        output = os.path.join(output, model.name)
+        os.makedirs(output, exist_ok=True)
+        fig.savefig(os.path.join(output, f"ROC {model.name} {kind}.png"))
     else:
         fig.show()
     
     plt.close(fig)
     
-    figs = []
-    
     for forced, df in sims.groupby("forced", dropna=False):
         
         forcing = "forced" if forced else "null"
         
-        metrics_fig = Metrics.plot(df.groupby("time")[["variance", "ac1"]].mean(), model.name)
-        metrics_fig.suptitle(f"Metrics (tsid averaged) {model.name} {forcing} {kind}")
+        metrics_fig = Metrics.plot(df.groupby("time")[["variance", "ac1"]].mean())
+        # metrics_fig.suptitle(f"Metrics for {model.name} {forcing} {kind}")
         metrics_fig.tight_layout()
-        figs.append(metrics_fig)
+        metrics_fig.savefig(os.path.join(output, f"Metrics for {model.name} {forcing} {kind}.png"))
+        plt.close(metrics_fig)
         
     if lstm is not None:
         for forced, df in metrics.groupby("forced", dropna=False):
@@ -605,29 +622,19 @@ def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.Da
             forcing = "forced" if forced else "null"
             
             lstm_fig = lstm.plot(
-                name = model.name,
                 means = lstm.calc_means(df),
                 reverse = False,
             )
             
-            lstm_fig.suptitle(f"{lstm.name} {model.name} {forcing} bifurcation classifcation on {kind}")
-            figs.append(lstm_fig)
-            
-    for fig in figs:
-        if output is not None:
-            path = os.path.join(output, model.name)
-            os.makedirs(path, exist_ok=True)
-            fig.savefig(os.path.join(path, fig.get_suptitle() + ".png"))
-        else:
-            fig.show()
-            
-        plt.close(fig)
+            lstm_fig.tight_layout()
+            lstm_fig.savefig(os.path.join(output, f"Bifurcation classifications on {model.name} {forcing} {kind}.png"))
+            plt.close(lstm_fig)
 
-def load_and_save(models: Iterable[TestModel], lstm: LSTM | None = None, path: str | None = None, output: str | None = None):
+def load_and_save(models: Iterable[TestModel], output: str, lstm: LSTM | None = None, metrics_path: str | None = None):
     for model in models:
         print("Generating/Loading metrics for", model.name)
         try:
-            metrics = get_metrics(lstm = lstm, path = path, model = model)
+            metrics = get_metrics(lstm = lstm, path = metrics_path, model = model)
             print("Plotting metrics for", model.name)
             for kind, (sims, metrics, roc) in metrics.items():
                 plot_metrics(model, kind=kind, sims=sims, metrics=metrics, roc=roc, output=output, lstm=lstm)
@@ -648,7 +655,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     load_and_save(
-        path=args.metrics, 
+        metrics_path=args.metrics, 
         output=args.output, 
         lstm=LSTMLoader(args.lstm).with_args(verbose=False) if args.lstm is not None else None,
         models=test_models(set([1500, 500])),

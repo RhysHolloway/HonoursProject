@@ -12,11 +12,11 @@ if __name__ == "__main__":
     
     PLOT_OUTPUT = get_project_path("output/plots")
     
-    lstm.with_args(verbose=True, window=35).run_with_output([Lisiecki], PLOT_OUTPUT)
+    lstm.with_args(verbose=True, window=35).run_with_output([Lisiecki], PLOT_OUTPUT, title=False)
     
     print("Generating project figures from data...")
     test.load_and_save(
-        path = get_project_path("output/metrics/"),
+        metrics_path = get_project_path("output/metrics/"),
         output = os.path.join(PLOT_OUTPUT),
         lstm=lstm.with_args(name="LSTM"),
         models=\

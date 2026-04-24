@@ -88,7 +88,7 @@ class LSTMLoader:
 type LSTMPeaks = dict[Column | None, dict[str, np.ndarray]]
 class LSTM(Model[pd.DataFrame]):
     
-    COLUMNS: Final[list[str]] = ["Fold", "Hopf", "Branch", "Null"]
+    COLUMNS: Final[list[str]] = ["Fold", "Hopf", "Transcritical", "Null"]
         
     def __init__(
         self: Self,
@@ -249,7 +249,7 @@ class LSTM(Model[pd.DataFrame]):
         self.results[dataset] = pd.concat(map(compute, dataset.df.columns))
 
     @staticmethod                
-    def plot(name: str, legend: Iterable[str] | None = None, preds: pd.DataFrame | None = None, means: pd.DataFrame | None = None, peaks: LSTMPeaks | None = None, reverse: bool = True) -> Figure:
+    def plot(legend: Iterable[str] | None = None, preds: pd.DataFrame | None = None, means: pd.DataFrame | None = None, peaks: LSTMPeaks | None = None, reverse: bool = True) -> Figure:
            
         if means is None and preds is None:
             raise ValueError("Please provide either the means or the predictions to plot for the LSTM!")
@@ -261,20 +261,25 @@ class LSTM(Model[pd.DataFrame]):
             return np.array([])
               
         # AGE = f"Age ({Dataset.age_format(get_time([means, preds]))})"
-        AGE = "Age"
+        AGE = "Age (ya)"
           
         multivar = preds is not None and "variable" in preds.index.names and len(preds.index.get_level_values("variable").unique()) > 1
           
-        fig, subplots = plt.subplots(nrows=((len(__class__.COLUMNS) - 1 if multivar else 0) + (2 if means is not None else 0)), ncols=1, sharex='all', sharey='all')
-        fig.suptitle(f"Bifurcation classifications on {name}")
+        fig, subplots = plt.subplots(
+            nrows=((len(__class__.COLUMNS) - 1 if multivar else 0) + (2 if means is not None else 0)), 
+            ncols=1, 
+            width_ratios=[3], 
+            sharex='all', 
+            sharey='all',
+        )
         
         last_ax = subplots[-1]
         last_ax.set_xlabel(AGE)
         last_ax.set_ylim(0, 1)
         
-        fmt = ScalarFormatter(useOffset=False)
-        fmt.set_scientific(False)
-        last_ax.xaxis.set_major_formatter(fmt)
+        # fmt = ScalarFormatter(useOffset=False)
+        # fmt.set_scientific(False)
+        # last_ax.xaxis.set_major_formatter(fmt)
 
         if reverse:
             last_ax.invert_xaxis()
@@ -289,20 +294,26 @@ class LSTM(Model[pd.DataFrame]):
         
         if means is not None:
             means_ax = subplots[-2]
-            means_ax.set_title("Mean Feature Probability")
+            means_ax.set_title("Average Bifurcation Probability for all features" if multivar else "Bifurcation Probabilities")
             means_ax.set_ylabel("Probability")
             for i, col in enumerate(__class__.COLUMNS[:-1]):
                 prob_plot(means_ax, None, col, means, col)
-            means_ax.legend()
+            means_ax.legend(
+                loc="center left",
+                bbox_to_anchor=(1, 0.5)
+            )
             
             bif_probs = means[__class__.COLUMNS[:-1]].set_index(means.index.get_level_values("time")).sum(axis=1)
-            last_ax.set_title("Any Bifurcation Probability")
+            last_ax.set_title("Probability of Any Bifurcation")
             last_ax.set_ylabel("Probability")
-            last_ax.plot(bif_probs, label="Combined")
+            last_ax.plot(bif_probs, label="Bifurcation")
             null = means[__class__.COLUMNS[-1]]
             null.index = null.index.get_level_values("time")
             last_ax.plot(null, label=null.name)
-            last_ax.legend()
+            last_ax.legend(
+                loc="center left",
+                bbox_to_anchor=(1, 0.5)
+            )
         
         if multivar:
             for i, col in enumerate(__class__.COLUMNS[:-1]): # All besides null column
@@ -318,14 +329,18 @@ class LSTM(Model[pd.DataFrame]):
         fig.tight_layout()
         return fig
 
-    def _plot(self: Self, dataset: Dataset) -> Figure:
-        return __class__.plot(
-            name = dataset.name,
+    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
+        fig = __class__.plot(
             legend = dataset.feature_names(),
             preds = self.results[dataset], 
             means = self.means(dataset), 
             peaks = self.peaks(dataset)
         )
+        if title:
+            fig.suptitle("Bifurcation classifications on " + dataset.name)
+        fig.tight_layout()
+        return fig
+        
 
 type BifId = Literal['HB', 'BP', 'LP']
 type BifType = Tuple[BifId, bool]

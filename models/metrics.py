@@ -100,14 +100,17 @@ class Metrics(Model[pd.DataFrame]):
     ):
         self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys())) # type: ignore               
     
-    def _plot(self: Self, dataset: Dataset) -> Figure:
-        return __class__.plot(self.results[dataset], dataset.name)
+    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
+        fig = __class__.plot(self.results[dataset])
+        if title:
+            fig.suptitle("Metrics of " + dataset.name)
+        fig.tight_layout()
+        return fig
     
     @staticmethod
-    def plot(df: pd.DataFrame, name: str) -> Figure:
+    def plot(df: pd.DataFrame) -> Figure:
         ROWS = 2
-        fig, axs = pyplot.subplots(nrows=ROWS, ncols=1, sharex = True)
-        fig.suptitle(name)
+        fig, axs = pyplot.subplots(nrows=ROWS, sharex = True)
 
         def plot(data: pd.Series, title: str, i: int):
             axs[i].set_ylabel(title)
@@ -119,6 +122,5 @@ class Metrics(Model[pd.DataFrame]):
                     
         plot(df["variance"], "Variance", 0)
         plot(df["ac1"], "AC-1", 1)
-            
-        fig.tight_layout()
+
         return fig
