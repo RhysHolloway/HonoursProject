@@ -11,7 +11,9 @@ from sklearn import metrics
 import matplotlib.pyplot as plt
 import os.path
 
-from models import Dataset, compute_residuals, interpolate, iter_progress, space_indices
+import models.lstm as lstm_module
+import models.metrics as metrics_module
+from models import Dataset, compute_residuals, iter_progress, space_indices
 from models.metrics import Metrics
 from models.lstm import LSTMLoader, LSTM, StochSim, Array, DeFunc
 
@@ -20,20 +22,18 @@ type ModelData = tuple[pd.Series, pd.Series, float]
 
 class TestModel(metaclass = abc.ABCMeta):
         
-    INDICES: Final[list[str]] = ["variable", "forced", "tsid", "time"]
+    INDICES: Final[list[str]] = ["forced", "tsid", "time"]
     COLUMNS: Final[list[str]] = ["state", "residuals"]
     
     def __init__(
         self: Self,
         name: str,
-        spacing: int,
-        age: str | None,
+        window: float | int = 0.25,
         sims: int = 10,
     ):
         self.name = name
-        self.spacing = spacing
-        self.age = age
         self.sims = sims
+        self.window = window
         
     # Returns residuals
     @abc.abstractmethod
@@ -73,7 +73,7 @@ class TestModel(metaclass = abc.ABCMeta):
     
     def metrics(self: Self, df: pd.DataFrame) -> pd.DataFrame:
         residuals = df["residuals"]
-        rolling = residuals.rolling(window=Metrics.window_index(residuals, 0.25))
+        rolling = residuals.rolling(window=Metrics.window_index(residuals, self.window))
         return pd.concat(
             itertools.chain([df], 
                 (
@@ -83,11 +83,15 @@ class TestModel(metaclass = abc.ABCMeta):
             ), axis=1)
     
     @staticmethod
-    def add_indices(df: pd.DataFrame, variable: str, forced: bool | np.bool, tsid: int | np.integer) -> pd.DataFrame:
-        df["variable"] = np.array([variable] * len(df))
-        df["forced"] = np.array([forced] * len(df))
-        df["tsid"] = np.array([tsid] * len(df))
-        return df.set_index(["variable", "forced", "tsid"], append=True).reorder_levels(__class__.INDICES)
+    def add_indices(df: pd.Series | pd.DataFrame, forced: bool | np.bool, tsid: int | np.integer):
+        df.index = pd.MultiIndex.from_arrays(
+            [
+                np.array([forced] * len(df)), 
+                np.array([tsid] * len(df)),
+                df.index, 
+            ], 
+            names=__class__.INDICES
+        )
         
 
 class SimModel(TestModel):
@@ -107,9 +111,7 @@ class SimModel(TestModel):
         sims: int = 10,
     ):
         super().__init__(
-            name = name,   
-            spacing=10,
-            age = None,
+            name = name,
             sims = sims,
         )
         
@@ -172,12 +174,16 @@ class SimModel(TestModel):
         
         if forced:
             tcrit = model.parameter[model.parameter > self.bcrit].index[0]
-            series = series[series.index < tcrit]
+            series = series[series.index >= tcrit]
             
-        return self.add_indices(pd.concat([
+        df = pd.concat([
                     series.to_frame(name="state"), 
                     compute_residuals(series)
-                    ], axis=1), str(series.name), forced, tsid)
+                    ], axis=1)
+            
+        self.add_indices(df, forced, tsid)
+        
+        return df
 
 
 class MayFold(SimModel):
@@ -264,87 +270,109 @@ class DatasetModel(TestModel):
     def __init__(
         self: Self,
         dataset: Dataset,
+        variable: str,
+        tcrit: int | float,
         bandwidth: int | float,
-        tcrit: Iterable[float] = (),
-        spacing: int | None = None,
+        window: int | float = 0.25,
+        detrend: str | None = None,
+        sims: int = 10,
     ):
         super().__init__(
             name=dataset.name,
-            spacing=spacing if spacing is not None else max(1, abs(int(dataset.df.index[-1] - dataset.df.index[0])) // 250),
-            age=Dataset.age_format(dataset.df.index),
+            window=window,
+            sims=sims,
         )
+
+        # Get times prior to transition (in years ago)
+        prior = dataset.df.loc[dataset.df.index >= tcrit, variable].astype(float).dropna()[::-1]
+        prior.index = -prior.index.astype(float)
+
+        # Make dataframe for interpolated data
+        df_inter = pd.DataFrame(
+            {"keep": True}, 
+            dtype=bool,
+            index=pd.Index(np.linspace(prior.index[0], prior.index[-1], len(prior)), name=prior.index.name),
+        )
+        
+        # Concatenate with original, interpolate, and extract the interpolated data
+        self.series = pd.concat([prior, df_inter]).infer_objects().interpolate(method="index").dropna(subset="keep")[variable]
+        
         self.bandwidth = float(bandwidth)
-        self.df = dataset.df
-        self.tcrit = set(t for t in tcrit if 0 <= t <= self.df.index.max())
-        if len(self.tcrit) == 0:
-            raise ValueError("A tipping point must be provided to test dataset", dataset.name)
+        self.tcrit = tcrit
+        self.detrend = detrend or "Lowess"
         
     def compute(self: Self, series: pd.Series) -> pd.DataFrame:
-        residuals = compute_residuals(series, span=self.bandwidth, type="Gaussian")
+        residuals = compute_residuals(series, span=self.bandwidth, type=self.detrend) # type: ignore
         return self.metrics(pd.concat([series.to_frame("state"), residuals], axis = 1))
     
     def simulate(self: Self, parallel: Parallel, verbose: bool, path: str | None = None) -> dict[str, pd.DataFrame]:
         
-        def per_transition(tcrit: float) -> tuple[str, pd.DataFrame]:
-            
-            COLUMNS = __class__.COLUMNS + ["variance", "ac1"]
-            NAME = f"tcrit{np.round(tcrit, decimals=2)}"
-            FILE = NAME + "_sims.csv"
+        COLUMNS = __class__.COLUMNS + ["variance", "ac1"]
+        NAME = f"tcrit{np.round(self.tcrit, decimals=2)}"
+        FILE = NAME + "_sims.csv"
 
-            df_load = self.load(path, FILE, columns = COLUMNS)
-            if df_load is not None:
-                return NAME, df_load
-                     
-            df = interpolate(self.df[self.df.index >= tcrit]).reset_index(names="time")
-            df["time"] = -df["time"]
-            df = df.iloc[::-1].set_index("time")
-            df = pd.concat(self.add_indices(self.compute(df[col]), str(col), True, 0) for col in df.columns)
+        df_load = self.load(path, FILE, columns = COLUMNS)
+        if df_load is not None:
+            groups = {
+                (bool(forced), int(tsid)): group.index.get_level_values("time") # type: ignore
+                for (forced, tsid), group in df_load.groupby(__class__.INDICES[:-1], dropna=False)
+            }
 
-            # Generate inputs for null simulation based on beginning of time-series
-            def map_null(t: tuple[Any, pd.DataFrame]):
-                col, group = t
-                residuals = group["residuals"].dropna()
-                window = residuals[:len(residuals) // 5]
+            cache_valid = groups.get((True, 0), pd.Index([])).equals(self.series.index) and all(
+                groups.get((False, tsid), pd.Index([])).equals(self.series.index)
+                for tsid in range(self.sims)
+            )
+
+            if cache_valid:
+                return {NAME:df_load}
+
+        df = self.compute(self.series)
+        self.add_indices(df, True, 0)
+
+        # Generate inputs for null simulation based on beginning of time-series
+        def map_null(group: pd.DataFrame):
+            residuals = group["residuals"].dropna()
+            window = residuals[:len(residuals) // 5]
+        
+            alpha = window.autocorr(lag=1)
+            sigma: float = np.sqrt(window.var() * (1.0 - alpha**2.0))
+            x0: float = residuals.iloc[0]  # initial condition   
+            time = group.index.get_level_values("time")
             
-                alpha = window.autocorr(lag=1)
-                sigma: float = np.sqrt(window.var() * (1.0 - alpha**2.0))
-                x0: float = residuals.iloc[0]  # initial condition   
-                time = group.index.get_level_values("time")
+            return alpha, sigma, x0, time
+        
+        # Generate a null simulation DataFrame given inputs
+        def compute_null(alpha: float, sigma: float, x0: float, tsid: int, time: pd.Index):
+            length = len(time)
+            dW = np.random.normal(size=length - 1)
+            s = np.empty(length)
+            s[:] = np.nan
+            s[0] = x0
+
+            # Run recursion in time
+            for i in range(1, length):
+                # Generate noise increment N(0,1)
+                s[i] = alpha * s[i-1] + sigma * dW[i - 1]
                 
-                return str(col), alpha, sigma, x0, time
-            
-            # Generate a null simulation DataFrame given inputs
-            def compute_null(variable: str, alpha: float, sigma: float, x0: float, tsid: int, time: pd.Index):
-                length = len(time)
-                dW = np.random.normal(size=length - 1)
-                s = np.empty(length)
-                s[:] = np.nan
-                s[0] = x0
+            df = self.compute(pd.Series(s, index=time))
+            self.add_indices(df, False, tsid)
+            return df
 
-                # Run recursion in time
-                for i in range(1, length):
-                    # Generate noise increment N(0,1)
-                    s[i] = alpha * s[i-1] + sigma * dW[i - 1]
-                    
-                return self.add_indices(self.compute(pd.Series(s, index=time)), variable, False, tsid)
-
-            # Generate N null simulations for each variable
-            df = pd.concat(
-                iter_progress(itertools.chain(
-                    [df], 
-                    parallel(
-                        delayed(compute_null)(variable, alpha, sigma, x0, tsid, time) 
-                        for (variable, alpha, sigma, x0, time), tsid in 
-                        itertools.product(
-                            map(map_null, iter(df.groupby("variable"))), 
-                            range(self.sims)
-                    ))), verbose, self.name + " simulations"))
-            
-            self.save(path, FILE, df)
-            
-            return NAME, df
-                        
-        return dict(per_transition(tcrit) for tcrit in self.tcrit)
+        # Generate N null simulations
+        df = pd.concat(
+            iter_progress(itertools.chain(
+                [df], 
+                parallel(
+                    delayed(compute_null)(alpha, sigma, x0, tsid, time) 
+                    for (alpha, sigma, x0, time), tsid in 
+                    itertools.product(
+                        [map_null(df)], 
+                        range(self.sims)
+                ))), verbose, self.name + " simulations"))
+        
+        self.save(path, FILE, df)
+        
+        return {NAME:df}
             
     
 def roc(
@@ -356,72 +384,81 @@ def roc(
     bifurcation: Literal["All", "Hopf", "Fold", "Branch"] = "All",
 ) -> pd.DataFrame:
     
-    LEVELS = ["i", "name", "variable", "start", "end"]
-    
-    list_df = []
-    for variable, df in df.groupby("variable"):
+    LEVELS = ["i", "name", "start", "end"]
         
-        FILE = f"roc_{variable}_{kind}.csv"
-                
-        load = model.load(path, FILE, indices=LEVELS, columns=["fpr", "tpr", "thresholds", "auc"])
-        if load is not None:
-            list_df.append(load)
-            continue
-        
-        df = df.reorder_levels(TestModel.INDICES)
-
-        def roc_interval(df: pd.DataFrame, interval: np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]) -> pd.DataFrame:
-                
-            def per_var(series: pd.Series, name: str) -> pd.DataFrame:
-                series = series.dropna()
-
-                time = series.index.get_level_values("time")
-                t_start = time[0]
-                t_end = series.loc[series.index.get_level_values("forced").to_numpy(dtype=bool)].reset_index().groupby("tsid")["time"].max().min() or time[-1]
-
-                # Get prediction interval in time
-                t_pred = t_start + (t_end - t_start) * interval
-
-                # Get data within prediction interval
-                trans_series: pd.Series = series[((time >= t_pred[0]) & (time <= t_pred[1]))]
+    FILE = f"roc_{kind}.csv"
             
-                # Compute ROC curve and threhsolds using sklearn
-                fpr, tpr, thresholds = metrics.roc_curve(trans_series.index.get_level_values("forced").astype(int), trans_series.to_numpy())
+    load = model.load(path, FILE, indices=LEVELS, columns=["fpr", "tpr", "thresholds", "auc"])
+    if load is not None:
+        return load
+    
+    df = df.reorder_levels(TestModel.INDICES)
 
-                df = pd.DataFrame({
-                    "fpr": fpr, 
-                    "tpr": tpr, 
-                    "thresholds": thresholds, 
-                    "auc": metrics.auc(fpr, tpr), # Compute AUC (area under curve)
-                    "name": name,
-                })
-                
-                df.index.name = "i"
-                return df.set_index("name", append=True)
+    def roc_interval(df: pd.DataFrame, interval: np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]) -> pd.DataFrame:
+        df = df.sort_index(level="time")
+        group_time = df.index.get_level_values("time")
+        forced_df = df.loc[df.index.get_level_values("forced").to_numpy(dtype=bool)]
             
-            ROC_TYPES: dict[str, str] = {
-                "ktau_variance": "Variance",
-                "ktau_ac1": "Lag-1 AC",
-            }
-                
-            preds = pd.concat(per_var(df[col], name) for col, name in ROC_TYPES.items() if col in df)
-                
-            if lstm is not None and set(LSTM.COLUMNS).issubset(df.columns):
-                preds = pd.concat([preds, per_var(df[LSTM.COLUMNS[:-1]].dropna().sum(axis=1) if bifurcation == "All" else df[bifurcation].dropna(), lstm.name)])
-                
-            preds["start"] = interval[0]
-            preds["end"] = interval[1]
+        def per_var(series: pd.Series, name: str) -> pd.DataFrame:
+            time = series.index.get_level_values("time")
+            t_start = group_time[0]
+            t_end = forced_df.reset_index().groupby("tsid")["time"].max().min() if len(forced_df) != 0 else group_time[-1]
 
-            return preds.set_index(["start", "end"], append=True)
+            # Get prediction interval in time
+            t_pred = t_start + (t_end - t_start) * interval
+
+            # Get data within prediction interval
+            trans_series: pd.Series = series[((time >= t_pred[0]) & (time <= t_pred[1]))].dropna()
+            truth = trans_series.index.get_level_values("forced").astype(int)
+            if len(trans_series) == 0 or len(np.unique(truth)) < 2:
+                return pd.DataFrame(columns=["fpr", "tpr", "thresholds", "auc", "name"]).set_index("name")
         
-        df = pd.concat(map(lambda interval: roc_interval(df, interval), [np.array([0.6, 0.8]), np.array([0.8, 1])]))
-        df = df.set_index(pd.Series([variable] * len(df), name = "variable"), append = True).reorder_levels(LEVELS)
-    
-        model.save(path, FILE, df)
+            # Compute ROC curve and threhsolds using sklearn
+            fpr, tpr, thresholds = metrics.roc_curve(truth, trans_series.to_numpy())
+
+            df = pd.DataFrame({
+                "fpr": fpr, 
+                "tpr": tpr, 
+                "thresholds": thresholds, 
+                "auc": metrics.auc(fpr, tpr), # Compute AUC (area under curve)
+                "name": name,
+            })
+            
+            df.index.name = "i"
+            return df.set_index("name", append=True)
         
-        list_df.append(df)
+        ROC_TYPES: dict[str, str] = {
+            "ktau_variance": "Variance",
+            "ktau_ac1": "Lag-1 AC",
+        }
+            
+        frames = [per_var(df[col], name) for col, name in ROC_TYPES.items() if col in df]
+            
+        if lstm is not None and set(LSTM.COLUMNS).issubset(df.columns):
+            combined = df[LSTM.COLUMNS[:-1]].sum(axis=1, min_count=len(LSTM.COLUMNS[:-1])) if bifurcation == "All" else df[bifurcation]
+            frames.append(per_var(combined, lstm.name))
+
+        frames = [frame for frame in frames if len(frame) != 0]
+        if len(frames) == 0:
+            return pd.DataFrame(columns=["fpr", "tpr", "thresholds", "auc", "name", "start", "end"]).set_index(["name", "start", "end"])
+
+        preds = pd.concat(frames)
+            
+        preds["start"] = interval[0]
+        preds["end"] = interval[1]
+
+        return preds.set_index(["start", "end"], append=True)
     
-    return pd.concat(list_df)
+    interval_frames = [roc_interval(df, interval) for interval in [np.array([0.6, 0.8]), np.array([0.8, 1])]]
+    interval_frames = [frame for frame in interval_frames if len(frame) != 0]
+    if len(interval_frames) == 0:
+        df = pd.DataFrame(columns=["fpr", "tpr", "thresholds", "auc"], index=pd.MultiIndex.from_tuples([], names=LEVELS))
+    else:
+        df = pd.concat(interval_frames).reorder_levels(LEVELS)
+
+    model.save(path, FILE, df)
+    
+    return df
 
 def counts(df: pd.DataFrame) -> pd.DataFrame:
     if set(LSTM.COLUMNS).issubset(df.columns):
@@ -435,133 +472,165 @@ type _ModelGetter = Tuple[str, list[ModelData] | Callable[[], list[ModelData]]]
 def test_models(lengths: set[int]) -> list[TestModel]:
     return [MayFold(lengths), CrHopf(lengths), CrTrans(lengths)]
         
-def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = None, verbose: bool = True) -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
+def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = None, verbose: bool = True) -> dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     
     parallel = Parallel(return_as="generator_unordered", backend="threading", n_jobs=4)
+    cache_sources = [__file__, metrics_module.__file__, lstm_module.__file__]
+    cache_source_mtime = max(
+        os.path.getmtime(source)
+        for source in cache_sources
+        if source is not None and os.path.exists(source)
+    )
     
-    def per_sim(kind: str, variable: str, forced: np.bool, tsid, df: pd.DataFrame) -> pd.DataFrame:
+    def per_sim(kind: str, forced: np.bool, tsid, df: pd.DataFrame) -> pd.DataFrame:
         assert pd.api.types.is_integer(tsid)
 
-        FILE = f"metrics_{variable}_{"forced" if forced else "null"}_{kind}_{tsid}.csv"
-        
-        metrics = model.load(path, FILE, columns=["ktau_variance","ktau_ac1"] + LSTM.COLUMNS if lstm is not None else [])
+        FILE = f"metrics_{"forced" if forced else "null"}_{kind}_{tsid}.csv"
+        metric_columns = ["variance", "ac1", "ktau_variance", "ktau_ac1"]
+        expected_columns = metric_columns + (LSTM.COLUMNS if lstm is not None else [])
+        cache_file = os.path.join(path, model.name, FILE) if path is not None else None
+        df = df.reset_index(TestModel.INDICES[:-1], drop=True).sort_index()
+
+        indices = space_indices(df["residuals"], spacing=10)
+
+        metrics = model.load(path, FILE, columns=expected_columns)
+        if metrics is not None and (
+            (cache_file is not None and os.path.exists(cache_file) and os.path.getmtime(cache_file) < cache_source_mtime)
+            or not metrics.index.is_unique
+            or (lstm is not None and not metrics[LSTM.COLUMNS].notna().all(axis=1).all())
+        ):
+            metrics = None
         
         if metrics is None:
-        
-            indices = space_indices(df["variance"], spacing=model.spacing)
-            
-            metrics = pd.concat((Metrics.ktau(df[col], indices=indices).to_frame() for col in ["variance", "ac1"]), axis=1)
+
+            metrics = pd.concat(
+                (
+                    Metrics.ktau(df[col], indices=indices).to_frame(name=f"ktau_{col}")
+                    for col in ["variance", "ac1"]
+                ),
+                axis=1,
+            )
 
             if lstm is not None:
-                metrics = pd.concat([metrics, lstm.run_on_series(df["residuals"], indices=indices, parallel=parallel)], axis=1)
+                metrics = lstm.run_on_series(df["residuals"], indices=indices).join(metrics, how = "outer")
 
-            metrics = TestModel.add_indices(metrics, variable, forced, tsid).sort_index()
+            TestModel.add_indices(metrics, forced, tsid)
+            
+            metrics = metrics.sort_index()
             
             model.save(path, FILE, metrics)
         
         return metrics
             
     metrics_dict = {
-        kind:pd.concat(
+        kind:(full_df, pd.concat(
             iter_progress((per_sim
-                (kind, str(variable), np.bool(forced), tsid, df) 
-                for (variable, forced, tsid), df 
+                (kind, np.bool(forced), tsid, df) 
+                for (forced, tsid), df 
                 in full_df.groupby(TestModel.INDICES[:-1], dropna=False)
-            ), verbose=verbose, desc=model.name)
+            ), verbose=verbose, desc=model.name))
         ) for kind, full_df in model.simulate(parallel, verbose=True, path=path).items()
     }
     
-    return {kind:(df, roc(
+    return {kind:(sims, df, roc(
                 model=model,
                 kind=kind,
                 df=df,
                 lstm=lstm,
-            )) for kind, df in metrics_dict.items()}
+            )) for kind, (sims, df) in metrics_dict.items()}
     
 
-def plot_metrics(model: TestModel, kind: str, metrics: pd.DataFrame, rocs: pd.DataFrame, output: str | None = None, lstm: LSTM | None = None):
-    for variable, roc in rocs.groupby(["variable"], dropna=False):
-            
-        fig = plt.figure(figsize=(12, 6))
+def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.DataFrame, roc: pd.DataFrame, output: str | None = None, lstm: LSTM | None = None):
+    
+    groups = roc.groupby(["start", "end"])
+    fig, axes = plt.subplots(figsize=(12,6), nrows=1, ncols=len(groups), squeeze=False)
+    
+    axes = axes.flatten()
         
-        groups = roc.groupby(["start", "end"])
-        axes: Sequence[Axes] = fig.subplots(nrows=1, ncols=len(groups))
-            
-        for i, ((start, end), roc) in enumerate(groups):
-            axis = axes[i]
-            
-            assert pd.api.types.is_float(start)
-            assert pd.api.types.is_float(end)
-            
-            for name, roc in roc.groupby("name"):
-                axis.plot(
-                    roc["fpr"],
-                    roc["tpr"],
-                    label=f"{name} bif (AUC={np.round(roc["auc"].iloc[0], 2)})"
-                )
-
-                # Line y=x
-                axis.plot(
-                    np.linspace(0, 1, 100),
-                    np.linspace(0, 1, 100),
-                    color="black", 
-                    linestyle="dashed",
-                )
-
-                axis.set_xlabel("False positive rate")
-                axis.set_xbound(-0.01, 1)
-                axis.set_ylabel("True positive rate") 
-                
-                axis.set_title(f"Window of {start * 100}% - {end * 100}% of data)")
-
-        for ax in axes:
-            ax.legend()
+    for i, ((start, end), roc) in enumerate(groups):
+        axis = axes[i]
         
-        fig.suptitle(f"ROC {model.name} {variable} {kind}")
+        assert pd.api.types.is_float(start)
+        assert pd.api.types.is_float(end)
         
+        for name, roc in roc.groupby("name"):
+            axis.plot(
+                roc["fpr"],
+                roc["tpr"],
+                label=f"{name} bif (AUC={np.round(roc["auc"].iloc[0], 2)})"
+            )
+
+            # Line y=x
+            axis.plot(
+                np.linspace(0, 1, 100),
+                np.linspace(0, 1, 100),
+                color="black", 
+                linestyle="dashed",
+            )
+
+            axis.set_xlabel("False positive rate")
+            axis.set_xbound(-0.01, 1)
+            axis.set_ylabel("True positive rate") 
+            
+            axis.set_title(f"Window of {start * 100}% - {end * 100}% of data)")
+
+    for ax in axes:
+        ax.legend()
+    
+    fig.suptitle(f"ROC {model.name} {kind}")
+    
+    if output is not None:
+        path = os.path.join(output, model.name)
+        os.makedirs(path, exist_ok=True)
+        fig.savefig(os.path.join(path, fig.get_suptitle() + ".png"))
+    else:
+        fig.show()
+    
+    plt.close(fig)
+    
+    figs = []
+    
+    for forced, df in sims.groupby("forced", dropna=False):
+        
+        forcing = "forced" if forced else "null"
+        
+        metrics_fig = Metrics.plot(df.groupby("time")[["variance", "ac1"]].mean(), model.name)
+        metrics_fig.suptitle(f"Metrics (tsid averaged) {model.name} {forcing} {kind}")
+        metrics_fig.tight_layout()
+        figs.append(metrics_fig)
+        
+    if lstm is not None:
+        for forced, df in metrics.groupby("forced", dropna=False):
+            
+            forcing = "forced" if forced else "null"
+            
+            lstm_fig = lstm.plot(
+                name = model.name,
+                means = lstm.calc_means(df),
+                reverse = False,
+            )
+            
+            lstm_fig.suptitle(f"{lstm.name} {model.name} {forcing} bifurcation classifcation on {kind}")
+            figs.append(lstm_fig)
+            
+    for fig in figs:
         if output is not None:
             path = os.path.join(output, model.name)
             os.makedirs(path, exist_ok=True)
             fig.savefig(os.path.join(path, fig.get_suptitle() + ".png"))
         else:
             fig.show()
-        
-        plt.close()
-    
-    if lstm is not None:
-        for (variable, forced), df in metrics.groupby(["variable", "forced"], dropna=False):
-                
-            lstm_fig = lstm.plot(
-                name = model.name,
-                means = lstm.calc_means(df),
-                age = model.age,
-                reverse = False,
-            )
             
-            lstm_fig.suptitle(f"{lstm.name} {model.name} {"forced" if forced else "null"} bifurcation classifcation on {variable} {kind}")
-            
-            metrics_fig = Metrics.plot(df, model.name)
-            metrics_fig.suptitle(f"{model.name} {variable} {kind} metrics")
-            
-            if output is not None:
-                path = os.path.join(output, model.name)
-                os.makedirs(path, exist_ok=True)
-                for fig in [lstm_fig, metrics_fig]:
-                    fig.savefig(os.path.join(path, fig.get_suptitle() + ".png"))
-            else:
-                for fig in [lstm_fig, metrics_fig]:
-                    fig.show()
-                
-            plt.close()
-    
+        plt.close(fig)
+
 def load_and_save(models: Iterable[TestModel], lstm: LSTM | None = None, path: str | None = None, output: str | None = None):
     for model in models:
         print("Generating/Loading metrics for", model.name)
         try:
             metrics = get_metrics(lstm = lstm, path = path, model = model)
             print("Plotting metrics for", model.name)
-            for kind, (metrics, rocs) in metrics.items():
-                plot_metrics(model, kind=kind, metrics=metrics, rocs=rocs, output=output, lstm=lstm)
+            for kind, (sims, metrics, roc) in metrics.items():
+                plot_metrics(model, kind=kind, sims=sims, metrics=metrics, roc=roc, output=output, lstm=lstm)
         except:
             traceback.print_exc()
             import sys

@@ -1,6 +1,8 @@
 import functools
 import itertools
-from typing import Any, Final, OrderedDict, Self, Sequence, Callable, Iterable, Literal, Tuple, TypeVar
+from typing import Any, Final, Self, Sequence, Callable, Iterable, Literal, Tuple, TypeVar
+
+from matplotlib.ticker import ScalarFormatter
 from models import Column, Dataset, Model
 
 from joblib import Parallel, delayed
@@ -12,35 +14,66 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
+import logging
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+import warnings
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from keras.models import load_model, Sequential as KerasModel
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Argument `decay` is no longer supported and will be ignored\.",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Skipping variable loading for optimizer '.*', because it has .* variables whereas the saved optimizer has .* variables\.",
+    category=UserWarning,
+)
 
 class LSTMLoader:
     
-    def __init__(self: Self, path: str):
+    def __init__(self: Self, path: str, jobs: int = 4):
         import os
         import os.path
         
         EXTENSIONS = [".keras", ".h5"]
-        
-        found: dict[int, list[KerasModel]] = dict()
-        
-        for path, _, files in os.walk(path):
-            for file in files:
-                file_path: str = os.path.join(path, file)
-                if os.path.isfile(file_path) and any(file.endswith(ext) for ext in EXTENSIONS):
-                    model: KerasModel = load_model(file_path) # type: ignore
-                    ts_len = model.input_shape[1]
-                    if ts_len not in found:
-                        found[ts_len] = list()
-                    found[ts_len].append(model)
+
+        def iter_model_paths() -> list[str]:
+            paths: list[str] = []
+            for root, _, files in os.walk(path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    if os.path.isfile(file_path) and any(file.endswith(ext) for ext in EXTENSIONS):
+                        paths.append(file_path)
+            return sorted(paths)
+
+        def load_one(file_path: str) -> tuple[int, str, KerasModel]:
+            model: KerasModel = load_model(file_path) # type: ignore
+            return int(model.input_shape[1]), file_path, model
+
+        found: dict[int, list[tuple[str, KerasModel]]] = dict()
+        loaded = Parallel(
+            n_jobs=jobs,
+            backend="threading",
+            prefer="threads",
+            require="sharedmem",
+        )(delayed(load_one)(file_path) for file_path in iter_model_paths())
+
+        for ts_len, file_path, model in loaded: # type: ignore
+            if ts_len not in found:
+                found[ts_len] = []
+            found[ts_len].append((file_path, model))
         
         if len(found) == 0:
             raise ValueError(f"Could not load any models from {path}!")
         
-        self.models: Final[dict[int, list[KerasModel]]] = found
-        self.keys: Final[list[int]] = sorted(self.models.keys())
+        self.models: Final[dict[int, list[KerasModel]]] = {
+            ts_len:[model for _, model in sorted(models, key=lambda pair: pair[0])]
+            for ts_len, models in found.items()
+        }
         
     @property
     def with_args(self: Self):
@@ -49,10 +82,8 @@ class LSTMLoader:
     def _get_models(self: Self, length: int) -> list[KerasModel]:
         if length == 0:
             return []
-        # Get the model with the closest input length lower or equal to the input series length (or else get the model with the lowest input length if none can be found)
-        ts_len = min((ts_len for ts_len in self.keys if ts_len >= length), default=self.keys[-1])
-        # print("Getting models for", ts_len, "for series of length", length)
-        return self.models[ts_len]
+        # Get the closest model length to the input length, preferring smaller models if there is a tie
+        return self.models[min(self.models.keys(), key=lambda ts_len:abs(ts_len-length))]
 
 type LSTMPeaks = dict[Column | None, dict[str, np.ndarray]]
 class LSTM(Model[pd.DataFrame]):
@@ -64,21 +95,26 @@ class LSTM(Model[pd.DataFrame]):
         get_models: Callable[[int], Sequence[KerasModel]],
         name: str = "LSTM",
         spacing: int = 10,
+        window: float | int = 0.25,
+        detrend: str = "LOWESS",
         verbose: bool = True,
+        jobs: int = 4,
     ):
         super().__init__(name)
         
         self.get_models = get_models
         self.verbose = verbose
         self.spacing = spacing
+        self.window = window
+        self.jobs = jobs
         self.result_means: dict[Dataset, pd.DataFrame] = dict()
         self.result_peaks: dict[Dataset, LSTMPeaks] = dict()
+        self.detrend = detrend
     
     def run_on_series(
         self: Self,
         series: pd.Series,
-        parallel: Parallel,
-        indices: Sequence[int] | None = None,
+        indices: Iterable[int] | None = None,
     ) -> pd.DataFrame:
         
         models = self.get_models(len(series))
@@ -86,46 +122,63 @@ class LSTM(Model[pd.DataFrame]):
             raise ValueError(f"No LSTM models were found to be used with {series.name}!")
         
         if indices is None:
-            indices = list(range(len(series)))[::self.spacing]
+            indices = space_indices(series, self.spacing)
+
+        MODEL_LENGTH = models[0].input_shape[1]
         
-        if len(indices) == 0:
-            return pd.DataFrame(columns=LSTM.COLUMNS + ["time"]).set_index("time")
-        
-        start = indices[0]
-        indices = indices[1:]
-                
-        def compute(tsid: int, imax: int) -> pd.DataFrame:
-            model = models[tsid]
-            input = series.iloc[start:imax]
+        windows: list[tuple[Any, np.ndarray[Any, np.dtype[np.float64]]]] = []
+        for imax in indices:
+            input = series.iloc[0:imax + 1]
+            time = series.index[imax]
             if len(input) == 0:
-                return pd.DataFrame(columns=self.COLUMNS + ["tsid", "time"]).set_index(["tsid", "time"])
-            time = input.index.get_level_values("time")[-1]
-            input = input.to_numpy()
-            input = input / np.mean(np.abs(input))
+                continue
+            input = input.to_numpy(dtype=float)
+            scale = np.mean(np.abs(input))
+            if not np.isfinite(scale) or scale == 0:
+                scale = 1.0
+            input = input / scale
             
             # Set time series to input shape either by truncation of the start of the series or by appending zeroes to the start
-            if len(input) > model.input_shape[1]:
-                input = input[-model.input_shape[1]:]
+            if len(input) > MODEL_LENGTH:
+                input = input[-MODEL_LENGTH:]
             else:
-                input = np.concatenate((np.zeros(model.input_shape[1] - len(input)), input))
+                input = np.concatenate((np.zeros(MODEL_LENGTH - len(input)), input))
+            windows.append((time, input))
 
+        if len(windows) == 0:
+            return pd.DataFrame(columns=LSTM.COLUMNS + ["time"]).set_index("time")
+
+        times = [time for time, _ in windows]
+        inputs = np.stack([data for _, data in windows]).reshape(len(windows), MODEL_LENGTH, 1)
+        def compute_model(tsid: int) -> pd.DataFrame:
+            model = models[tsid]
+            
             # Get DL prediction
             return pd.DataFrame(
                 model.predict(
-                    input.reshape(1, -1, 1), 
+                    inputs, 
                     verbose=0, #type: ignore
                     batch_size=256
-                    ), 
-                columns=self.COLUMNS, 
-                index = pd.MultiIndex.from_tuples([(tsid, time)], names=["tsid", "time"])
+                ),
+                columns=self.COLUMNS,
+                index = pd.MultiIndex.from_arrays(
+                    [[tsid] * len(windows), times], 
+                    names=["tsid", "time"]
+                ),
             )
             
         return self.calc_means(
             pd.concat(
-                parallel(
-                    delayed(compute)(tsid, imax) 
-                    for tsid, imax in iter_progress(
-                        itertools.product(range(len(models)), indices),
+                Parallel(
+                    n_jobs=self.jobs,
+                    backend="threading",
+                    prefer="threads",
+                    require="sharedmem",
+                    return_as="generator_unordered",
+                )(
+                    delayed(compute_model)(tsid)
+                    for tsid in iter_progress(
+                        range(len(models)),
                         self.verbose, 
                         desc=f"{self.name} {series.name}"
                     )
@@ -156,7 +209,7 @@ class LSTM(Model[pd.DataFrame]):
                 )[0] for name, col in df[__class__.COLUMNS[:-1]].items()
             }
         
-        peaks: dict[Any, Any] = {feature:subset(df) for feature, df in predictions.groupby("variable")} 
+        peaks: dict[Any, Any] = {feature:subset(df) for feature, df in (predictions.groupby("variable") if "variable" in predictions.index.names else [(None, predictions)])} 
         if means is not None:
             peaks[None] = subset(means)
         return peaks
@@ -185,46 +238,44 @@ class LSTM(Model[pd.DataFrame]):
     def run(
         self: Self,
         dataset: Dataset,
+        window: float | int | None = None,
+        detrend: str | None = None,
     ):
-        parallel = Parallel(return_as="generator_unordered", backend="threading", n_jobs=4)
-        
         def compute(feature: Column) -> pd.DataFrame:
-            residuals = compute_residuals(dataset.df[feature])[::-1] # type: ignore
-            df = self.run_on_series(residuals, parallel=parallel)
-            df["variable"] = np.array([feature] * len(df))
-            return df.set_index("variable", append=True)
+            residuals = compute_residuals(dataset.df[feature],span=window or self.window, type=detrend or self.detrend)[::-1] # type: ignore
+            df = self.run_on_series(residuals)
+            return df.set_index(pd.Series([feature] * len(df), name="variable"), append=True)
         
         self.results[dataset] = pd.concat(map(compute, dataset.df.columns))
 
-    def _print(self: Self, dataset: Dataset):
-        preds = self.results[dataset]
-        peaks = self.peaks(dataset)
-        for col, col_indices in peaks.items():
-            df = preds[preds.index.get_level_values("variable") == col]
-            detected = sum(len(p) for p in col_indices.values())
-            if detected != 0:
-                print(f"Detected {detected} peaks for {f'variable {col}' if col is not None else 'combined data'}:")
-                for type, indices in col_indices.items():
-                    for idx in indices:
-                        print(f"{df[type].iloc[idx]} ({type}) at {df[type].index[idx]} {dataset.age_format}")
-
     @staticmethod                
-    def plot(name: str, legend: Iterable[str] | None = None, age: str | None = None, preds: pd.DataFrame | None = None, means: pd.DataFrame | None = None, peaks: LSTMPeaks | None = None, reverse: bool = True) -> Figure:
-                
+    def plot(name: str, legend: Iterable[str] | None = None, preds: pd.DataFrame | None = None, means: pd.DataFrame | None = None, peaks: LSTMPeaks | None = None, reverse: bool = True) -> Figure:
+           
         if means is None and preds is None:
             raise ValueError("Please provide either the means or the predictions to plot for the LSTM!")
-                
-        fig = plt.figure(figsize=(9, 1 + (5 if means is not None else 0) + (8 if preds is not None else 0)))
+        
+        def get_time(dfs: Iterable[pd.DataFrame | None]) -> np.ndarray[tuple[Any], np.dtype[np.number]]:
+            for df in dfs:
+                if df is not None:
+                    return (df.index.get_level_values("time") if "time" in df.index.names else df.index).to_numpy()
+            return np.array([])
+              
+        # AGE = f"Age ({Dataset.age_format(get_time([means, preds]))})"
+        AGE = "Age"
+          
+        multivar = preds is not None and "variable" in preds.index.names and len(preds.index.get_level_values("variable").unique()) > 1
+          
+        fig, subplots = plt.subplots(nrows=((len(__class__.COLUMNS) - 1 if multivar else 0) + (2 if means is not None else 0)), ncols=1, sharex='all', sharey='all')
         fig.suptitle(f"Bifurcation classifications on {name}")
-        
-        AGE = f"Age ({age})" if age is not None else "Age"
-        BIF_COLS = __class__.COLUMNS[:-1]
-        
-        subplots: Sequence[Axes] = fig.subplots(nrows=((len(BIF_COLS) if preds is not None else 0) + (2 if means is not None else 0)), ncols=1, sharex='all', sharey='all')
         
         last_ax = subplots[-1]
         last_ax.set_xlabel(AGE)
         last_ax.set_ylim(0, 1)
+        
+        fmt = ScalarFormatter(useOffset=False)
+        fmt.set_scientific(False)
+        last_ax.xaxis.set_major_formatter(fmt)
+
         if reverse:
             last_ax.invert_xaxis()
         
@@ -238,36 +289,39 @@ class LSTM(Model[pd.DataFrame]):
         
         if means is not None:
             means_ax = subplots[-2]
-            means_ax.set_ylabel("Mean Feature Probability")
-            for i, col in enumerate(BIF_COLS):
+            means_ax.set_title("Mean Feature Probability")
+            means_ax.set_ylabel("Probability")
+            for i, col in enumerate(__class__.COLUMNS[:-1]):
                 prob_plot(means_ax, None, col, means, col)
             means_ax.legend()
             
-            bif_probs = means[BIF_COLS].set_index(means.index.get_level_values("time")).sum(axis=1)
-            last_ax.set_ylabel("Combined Bifurcation Probability")
+            bif_probs = means[__class__.COLUMNS[:-1]].set_index(means.index.get_level_values("time")).sum(axis=1)
+            last_ax.set_title("Any Bifurcation Probability")
+            last_ax.set_ylabel("Probability")
             last_ax.plot(bif_probs, label="Combined")
             null = means[__class__.COLUMNS[-1]]
             null.index = null.index.get_level_values("time")
             last_ax.plot(null, label=null.name)
             last_ax.legend()
         
-        if preds is not None:
-            for i, col in enumerate(BIF_COLS): # All besides null column, which
+        if multivar:
+            for i, col in enumerate(__class__.COLUMNS[:-1]): # All besides null column
                 ax = subplots[i]
+                ax.set_title(f"{col} Probability")
                 ax.set_xlabel(AGE)
-                ax.set_ylabel(col + " Probability")
-                for feature, data in preds.groupby("variable"):
-                    prob_plot(last_ax, feature, col, data, col)
+                ax.set_ylabel("Probability")
+                for feature, data in preds.groupby("variable"): # type: ignore
+                    prob_plot(ax, feature, col, data, str(feature))
             if legend is not None:
                 fig.legend(legend)
         
+        fig.tight_layout()
         return fig
 
     def _plot(self: Self, dataset: Dataset) -> Figure:
         return __class__.plot(
             name = dataset.name,
             legend = dataset.feature_names(),
-            age = Dataset.age_format(dataset.df.index),
             preds = self.results[dataset], 
             means = self.means(dataset), 
             peaks = self.peaks(dataset)
@@ -358,9 +412,16 @@ class StochSim():
         
         # Set up bifurcation parameter b, that increases linearly in time from binit to bcrit
         self.parameter = pd.Series(np.linspace(b_start,b_end,len(time)),index=time)
-        
+        self._parameter_values = self.parameter.to_numpy(copy=False)
+        self._time_values = time.to_numpy(dtype=float, copy=False)
         self.dt = dt
         self.dt_sample = dt_sample
+        self.sample_step = max(1, int(round(dt_sample / dt)))
+
+        if not np.isclose(self.sample_step * dt, dt_sample):
+            raise ValueError(
+                f"dt_sample={dt_sample} must be an integer multiple of dt={dt}"
+            )
         
 
     # Throws floating point error
@@ -392,27 +453,49 @@ class StochSim():
         :rtype: DataFrame
         """
         
-        ## Implement Euler Maryuyama for stocahstic simulation
-        s: Array = np.empty([len(self.parameter),len(s0)])
-        s[:] = np.nan
-        
-        # Create brownian increments (s.d. sqrt(dt))
-        dW = rand.normal(loc=0, scale=np.sqrt(self.dt) * sigma, size = [len(self.parameter/self.dt),len(s0)])
-        
-        # Run burn-in period on s0
+        ## Implement Euler Maryuyama for stochastic simulation
+        state = np.array(s0, dtype=float, copy=True)
+        n_state = len(state)
+        n_steps = len(self._parameter_values)
+        sampled_steps = np.arange(0, n_steps, self.sample_step)
+
+        samples: Array = np.empty((len(sampled_steps), n_state))
+        samples[:] = np.nan
+
+        dW = rand.normal(
+            loc=0,
+            scale=np.sqrt(self.dt) * sigma,
+            size=(max(0, n_steps - 1), n_state),
+        )
+
+        sample_pos = 0
+        burn_steps = max(0, int(round(tburn / self.dt)))
+
         with np.errstate(invalid="raise", over="raise", divide="raise"):
             try:
-                if tburn > 0:
-                    dW_burn = rand.normal(loc=0, scale=np.sqrt(self.dt) * sigma, size = [int(tburn/self.dt),len(s0)])
-                    # Get initial condition post burn-in period
-                    for i in range(int(tburn/self.dt)):
-                        s0 = s0 + de_fun(s0, self.parameter.iloc[0]) * self.dt + dW_burn[i]
-                    s[0] = s0
-                
-                # Run simulation, updating bifurcation parameter
-                for i in range(len(self.parameter)-1):
-                    s[i+1] = clip(s[i] + de_fun(s[i], self.parameter.iloc[i])*self.dt + dW[i])
-            finally:
-                df = pd.DataFrame(s, columns=[f"p{i}" for i in range(s.shape[1])], index=self.parameter.index).iloc[0::int(self.dt_sample/self.dt)]
-                df.index = df.index.astype(int)
-                return df
+                if burn_steps > 0:
+                    dW_burn = rand.normal(
+                        loc=0,
+                        scale=np.sqrt(self.dt) * sigma,
+                        size=(burn_steps, n_state),
+                    )
+                    p0 = self._parameter_values[0]
+                    for noise in dW_burn:
+                        state = state + de_fun(state, p0) * self.dt + noise
+
+                samples[0] = state
+                sample_pos = 1
+
+                for i in range(n_steps - 1):
+                    state = clip(state + de_fun(state, self._parameter_values[i]) * self.dt + dW[i])
+                    if (i + 1) % self.sample_step == 0:
+                        samples[sample_pos] = state
+                        sample_pos += 1
+            except FloatingPointError:
+                pass
+
+        return pd.DataFrame(
+            samples,
+            columns=[f"p{i}" for i in range(n_state)],
+            index=pd.Index(self._time_values[sampled_steps], name="time"),
+        )

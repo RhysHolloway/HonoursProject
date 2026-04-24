@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import traceback
 from typing import Any, Callable, Generic, Iterable, Literal, Self, Sequence, TypeVar, ValuesView
 from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import time
@@ -9,12 +12,6 @@ import abc
 type Column = str | Sequence[str]
 type FeatureColumns = dict[Column, str] | Sequence[Column]
 
-def interpolate(df: pd.DataFrame) -> pd.DataFrame:
-    step = np.ceil(np.min([y-x for x, y in zip(df.index[:-1], df.index[1:])])) # Get the min distance between consecutive ages
-    ages = df.index.to_numpy(dtype=float)
-    new_ages = np.arange(np.ceil(ages.min()), np.floor(ages.max()), step)
-    return pd.DataFrame({col:np.interp(new_ages, ages, series) for col, series in df.items()}, index=pd.Index(new_ages, name=df.index.name))
-
 def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussian", "Lowess"] = "Lowess") -> pd.Series:
     from scipy.ndimage import gaussian_filter
     from statsmodels.nonparametric.smoothers_lowess import lowess
@@ -22,7 +19,6 @@ def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussia
     data = pd.Series(data, index=data.index.get_level_values("time"))
     match type:
         case "Gaussian":
-            # Calculate residual (from ewstools)
             # Standard deviation of kernel given bandwidth
             # Note that for a Gaussian, quartiles are at +/- 0.675*sigma
             span = span * len(data) if 0 < span <= 1 else span
@@ -73,7 +69,12 @@ class Dataset:
         
         feature_cols = __class__._convert_feature_cols(feature_cols)
         
-        loaded_df = __class__._prepare_df(df(), age_col, age_scale, list(feature_cols.keys())).rename(feature_cols, axis=1)
+        loaded_df = __class__._prepare_df(
+            df(),
+            age_col,
+            age_scale,
+            list(feature_cols.keys()),
+        ).rename(feature_cols, axis=1)
         
         return Dataset(
             name=name,
@@ -152,8 +153,13 @@ class Dataset:
         return df_sel
     
     @staticmethod
-    def age_format(ages: Iterable[Any]) -> str:
-        match np.log10(min(age for age in ages if age > 0)) // 3:
+    def age_format(ages: np.ndarray[tuple[Any], np.dtype[np.number]]) -> str:
+        if ages.size == 0:
+            raise ValueError("Empty timespan!")
+        ages = np.abs(ages)
+        ages = ages[np.nonzero(ages)]
+        lowest = np.min(ages)
+        match np.log10(lowest) // 3:
             case 0: return "ya"
             case 1: return "kya"
             case 2: return "mya"
@@ -174,10 +180,6 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
     def run(self: Self, dataset: Dataset):
         pass
     
-    @abc.abstractmethod
-    def _print(self: Self, dataset: Dataset):
-        pass
-       
     @abc.abstractmethod 
     def _plot(self: Self, dataset: Dataset) -> Figure:
         pass
@@ -198,6 +200,7 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
                     fig = self._plot(dataset)
                     import os.path
                     fig.savefig(os.path.join(path, f"{self.name} {dataset.name}.png"))
+                    plt.close(fig)
                 except Exception:
                     traceback.print_exc()
             except Exception:

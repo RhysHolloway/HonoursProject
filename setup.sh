@@ -32,7 +32,7 @@ if [ ! -d "$PY_VENV_DIR/" ]; then
     python -m venv $PY_VENV_DIR
     source "$PY_VENV_DIR/$VENV_SCRIPT"
     echo "Installing required packages..."
-    pip install -r "../requirements.txt"
+    pip install -e ..
 else
     echo "Activating virtual environment..."
     source "$PY_VENV_DIR/$VENV_SCRIPT"

@@ -13,7 +13,7 @@ BATCHES=25
 
 cd $DIR
 git fetch origin && git pull
-source env.sh
+source setup.sh
 
 for len in 500 1500 ;
 do

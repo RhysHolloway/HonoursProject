@@ -1,3 +1,4 @@
+import functools
 from typing import Literal, Self, Sequence
 from matplotlib import pyplot
 from matplotlib.axes import Axes
@@ -7,7 +8,8 @@ import pandas as pd
 import scipy.stats
 from scipy.stats._axis_nan_policy import SmallSampleWarning
 from models import Dataset, Model, compute_residuals, space_indices
-
+import warnings
+        
 class Metrics(Model[pd.DataFrame]):
     
     def __init__(
@@ -27,22 +29,20 @@ class Metrics(Model[pd.DataFrame]):
 
     # Compute kendall tau values at equally spaced time points
     @staticmethod
-    def ktau(series: pd.Series, indices: Sequence[int]) -> pd.Series:        
-        # Get first non-NaN index in series
-        if len(indices) == 0:
-            return pd.Series(name = f"ktau_{series.name}")
-        start = indices[0]
-        indices = indices[1:]
-        
-        series = series.reset_index("time").set_index("time")[series.name]
+    def ktau(series: pd.Series, indices: Sequence[int]) -> pd.Series:
+        start = series.index.get_loc(series.first_valid_index())    
+        if len(indices) == 0 or start is None:
+            return pd.Series(dtype=float, name=f"ktau_{series.name}")
+        new_series = functools.partial(pd.Series, dtype=float, index=series.index[indices], name=f"ktau_{series.name}")
         
         def compute(imax: int) -> float:
-            part = series.iloc[start:imax]
-            return scipy.stats.kendalltau(part.index, part).statistic # type: ignore
+            if imax < start: # type: ignore
+                return np.nan
+            part = series.iloc[start:imax + 1]
+            with warnings.catch_warnings(action="ignore", category=SmallSampleWarning):
+                return scipy.stats.kendalltau(x=part.index, y=part).statistic # type: ignore
             
-        import warnings
-        with warnings.catch_warnings(action="ignore", category=SmallSampleWarning):
-            return pd.Series(map(compute, indices), index=series.index[indices], name = f"ktau_{series.name}")
+        return new_series(map(compute, indices)).dropna()
     
     @staticmethod
     def window_index(series: pd.Series, window: float) -> int:
@@ -98,10 +98,7 @@ class Metrics(Model[pd.DataFrame]):
         self: Self,
         dataset: Dataset,
     ):
-        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys())) # type: ignore
-        
-    def _print(self: Self, dataset: Dataset):
-        pass                   
+        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys())) # type: ignore               
     
     def _plot(self: Self, dataset: Dataset) -> Figure:
         return __class__.plot(self.results[dataset], dataset.name)
@@ -111,15 +108,14 @@ class Metrics(Model[pd.DataFrame]):
         ROWS = 2
         fig, axs = pyplot.subplots(nrows=ROWS, ncols=1, sharex = True)
         fig.suptitle(name)
-        
+
         def plot(data: pd.Series, title: str, i: int):
             axs[i].set_ylabel(title)
             axs[i].invert_xaxis()
-            # if i == 0:
-            #     axs[i].legend(dataset.feature_names())
+            time = data.index.get_level_values("time")
             if i == ROWS - 1:
-                axs[i].set_xlabel(f"Age ({Dataset.age_format(data.index)})")
-            axs[i].plot(data, data.index, label=title)
+                axs[i].set_xlabel(f"Age ({Dataset.age_format(time.to_numpy())})")
+            axs[i].plot(time, data.to_numpy(), label=title)
                     
         plot(df["variance"], "Variance", 0)
         plot(df["ac1"], "AC-1", 1)

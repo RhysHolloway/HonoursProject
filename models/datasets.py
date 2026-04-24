@@ -1,4 +1,4 @@
-import models
+from models.lstm.test import DatasetModel
 from models import Column, Dataset
 import os.path
 
@@ -44,19 +44,19 @@ Scotese = Dataset.load(
 )
 
 _GMST: dict[Column, str] = {
-    "GMST_05": "5%",
-    "GMST_16": "16%",
-    "GMST_50": "50%",
-    "GMST_84": "84%",
-    "GMST_95": "95%",
+    "GMST_05": "GMST 5%",
+    "GMST_16": "GMST 16%",
+    "GMST_50": "GMST 50%",
+    "GMST_84": "GMST 84%",
+    "GMST_95": "GMST 95%",
 }
 
 _CO2: dict[Column, str] = {
-    "CO2_05": "5%",
-    "CO2_16": "16%",
-    "CO2_50": "50%",
-    "CO2_84": "84%",
-    "CO2_95": "95%",
+    "CO2_05": "CO2 5%",
+    "CO2_16": "CO2 16%",
+    "CO2_50": "CO2 50%",
+    "CO2_84": "CO2 84%",
+    "CO2_95": "CO2 95%",
 }
 
 Judd = Dataset.load(
@@ -68,8 +68,8 @@ Judd = Dataset.load(
 )
 
 _JuddSplit = Judd.split({
-    "GMST Confidence": _GMST,
-    "CO2 Confidence": _CO2,
+    "GMST Confidence": list(_GMST.values()),
+    "CO2 Confidence": list(_CO2.values()),
 })
 
 JuddGMST, JuddCO2 = _JuddSplit["GMST Confidence"], _JuddSplit["CO2 Confidence"]
@@ -79,7 +79,7 @@ BuryEndGreenhouseEarth = Dataset.load(
     df=lambda: pd.read_csv(data_path("bury_paleoclimate/tripati2005/tripati2005_select.csv"), encoding="utf-8-sig"),
     age_col="Age",
     feature_cols={"CaCO3": "CaCO3 (%)"},
-    age_scale=1_000_000
+    age_scale=1_000_000,
 ).age_range(32_000_000, 40_000_000)
 
 BuryBollingAllerod = Dataset.load(
@@ -125,7 +125,7 @@ _BuryDeutnat = Dataset.load(
         skiprows=range(0, 111),
     ),
     age_col="Age",
-    feature_cols={"d2H": "d2H (%)"}
+    feature_cols={"d2H": "d2H (%)"},
 )
 
 BuryEndGlaciationI = _BuryDeutnat.age_range(12_000, 58_000)
@@ -143,12 +143,24 @@ BuryEndGlaciationIV.name = "Bury paleoclimate - End of glaciation IV"
 # Dataset, Gaussian detrending bandwidth, and transition age from the
 # paleoclimate empirical tests in Bury et al.'s PNAS repository.
 BuryPaleoclimate = [
-    (BuryEndGreenhouseEarth, 25, [34_000_000]),
-    (BuryBollingAllerod, 25, [15_000]),
-    (BuryEndYoungerDryas, 100, [11_600]),
-    (BuryDesertificationNorthAfrica, 10, [5700]),
-    (BuryEndGlaciationI, 25, [17_000]),
-    (BuryEndGlaciationII, 25, [135_000]),
-    (BuryEndGlaciationIII, 10, [242_000]),
-    (BuryEndGlaciationIV, 50, [334_100]),
+    (BuryEndGreenhouseEarth, 34_000_000, 25),
+    (BuryBollingAllerod, 15_000, 25),
+    (BuryEndYoungerDryas, 11_600, 100),
+    (BuryDesertificationNorthAfrica, 5700, 10),
+    (BuryEndGlaciationI, 17_000, 25),
+    (BuryEndGlaciationII, 135_000, 25),
+    (BuryEndGlaciationIII, 242_000, 10),
+    (BuryEndGlaciationIV, 334_100, 50),
+]
+
+BuryPaleoclimate = [
+    DatasetModel(
+        dataset,
+        dataset.df.columns[0],
+        tcrit,
+        bandwidth,
+        detrend="Lowess",
+        window=0.5,
+    )
+    for dataset, tcrit, bandwidth in BuryPaleoclimate
 ]

@@ -19,13 +19,13 @@ import atomics
 from atomics.base import AtomicUint
 import numpy as np
 import ruptures
-from typing import Any, Callable, Final, Self, Sequence, Union
+from typing import Any, Callable, Final, Literal, Self, Sequence, TypeAlias, Union
 import pandas as pd
-import concurrent.futures
-from concurrent.futures import Executor, ThreadPoolExecutor
+from joblib import Parallel, delayed
+import scipy.optimize as opt
 import scipy.optimize._nonlin as nl
+
 from pycont.Types import ContinuationResult 
-from pycont.Stability import rightmost_eig_realpart
 import pycont
 
 from ..lstm import *
@@ -120,18 +120,96 @@ class BifCounts(Counts):
         attr = Counts.attr(type)
         setattr(self, attr, getattr(self, attr) + 1)
 
-type _Simulation = tuple[Sims, BifType]
-type _Simulations = dict[int, _Simulation]
+_Simulation: TypeAlias = tuple[Sims, BifType]
+_Simulations: TypeAlias = dict[int, _Simulation]
 
-type _ModelOutput = list[_Simulation]
+_ModelOutput: TypeAlias = list[_Simulation]
 
-type _2DArray = np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]
+_2DArray: TypeAlias = np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]
+
+
+def _needs_sample(counts: Counts, bif_type: BifType, bif_max: int) -> bool:
+    return counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max)
+
+
+def _evaluate_polynomial(a: np.ndarray, b: np.ndarray, u: np.ndarray) -> np.ndarray:
+    x, y = u
+    x2 = x * x
+    y2 = y * y
+    xy = x * y
+
+    f1 = (
+        a[0] + a[1] * x + a[2] * y + a[3] * x2 + a[4] * xy +
+        a[5] * y2 + a[6] * x * x2 + a[7] * x2 * y + a[8] * x * y2 +
+        a[9] * y * y2
+    )
+    f2 = (
+        b[0] + b[1] * x + b[2] * y + b[3] * x2 + b[4] * xy +
+        b[5] * y2 + b[6] * x * x2 + b[7] * x2 * y + b[8] * x * y2 +
+        b[9] * y * y2
+    )
+    return np.array([f1, f2])
+
+
+def _jacobian(pars: _2DArray, u: np.ndarray) -> np.ndarray:
+    x, y = u
+    a1,a2,a3,a4,a5,a6,a7,a8,a9,a10 = pars[:10]
+    b1,b2,b3,b4,b5,b6,b7,b8,b9,b10 = pars[10:]
+
+    return np.array([
+        [
+            a2 + 2 * a4 * x + a5 * y + 3 * a7 * x * x + 2 * a8 * x * y + a9 * y * y,
+            a3 + a5 * x + 2 * a6 * y + a8 * x * x + 2 * a9 * x * y + 3 * a10 * y * y,
+        ],
+        [
+            b2 + 2 * b4 * x + b5 * y + 3 * b7 * x * x + 2 * b8 * x * y + b9 * y * y,
+            b3 + b5 * x + 2 * b6 * y + b8 * x * x + 2 * b9 * x * y + 3 * b10 * y * y,
+        ],
+    ], dtype=float)
+
+
+def _fixed_polynomial_field(pars: _2DArray) -> Callable[[np.ndarray], np.ndarray]:
+    a = np.array(pars[:10], copy=True)
+    b = np.array(pars[10:], copy=True)
+    return lambda u: _evaluate_polynomial(a, b, u)
+
+
+def _find_stable_equilibrium(pars: _2DArray, s0: _2DArray) -> tuple[np.ndarray, float] | None:
+    field = _fixed_polynomial_field(pars)
+    guesses = [
+        np.array(s0, dtype=float, copy=True),
+        np.zeros_like(s0, dtype=float),
+        np.array(-s0, dtype=float, copy=True),
+    ]
+
+    for guess in guesses:
+        try:
+            sol = opt.root(field, guess, method="hybr", options={"xtol": 1e-10, "maxfev": 200})
+        except (ValueError, OverflowError, FloatingPointError):
+            continue
+
+        if not sol.success or not np.all(np.isfinite(sol.x)):
+            continue
+
+        equilibrium = np.array(sol.x, dtype=float, copy=True)
+        residual = field(equilibrium)
+        if (not np.all(np.isfinite(residual))) or np.linalg.norm(residual) > 1e-8:
+            continue
+
+        eigvals = np.linalg.eigvals(_jacobian(pars, equilibrium))
+        rightmost = float(np.max(np.real(eigvals)))
+        if (not np.isfinite(rightmost)) or rightmost >= 0.0:
+            continue
+
+        return equilibrium, abs(rightmost)
+
+    return None
 
 def _gen_model(
     ts_len: int,
     bif_max: int,
     total_counts: _AtomicCounts,
-    pool: Executor,
+    param_jobs: int,
     # Set a proportion (chosen randomly) of the parameters to zero.
     sparsity:float = 0.5
 ):
@@ -168,23 +246,40 @@ def _gen_model(
     # Define intial condition (2 dimensional array)
     s0 = np.random.normal(loc=0,scale=2,size=2)
 
-    # Multithread the parameter simuations
-    tasks = [
-        pool.submit(
-            _simulate, 
-            par, 
-            pars, 
-            s0, 
-            ts_len, 
-            bif_max, 
-            total_counts
-        ) for par in range(len(pars)) if pars[par] != 0.0
-    ]
+    equilibrium_data = _find_stable_equilibrium(pars, s0)
+    if equilibrium_data is None:
+        return
 
-    for task in concurrent.futures.as_completed(tasks):
-        e = task.exception()
-        r = e if e is not None else task.result()
-        tasks.remove(task)
+    equilibrium, rrate = equilibrium_data
+    nonzero_parameters = np.flatnonzero(pars != 0.0)
+    if len(nonzero_parameters) == 0:
+        return
+
+    def safe_simulate(par: int) -> _ModelOutput | Exception:
+        try:
+            return _simulate(
+                par=int(par),
+                pars=pars,
+                equilibrium=equilibrium,
+                rrate=rrate,
+                ts_len=ts_len,
+                bif_max=bif_max,
+                total_counts=total_counts,
+            )
+        except Exception as exc:
+            return exc
+
+    results = Parallel(
+        n_jobs=max(1, int(param_jobs)),
+        backend="threading",
+        return_as="generator_unordered",
+        pre_dispatch=max(1, int(param_jobs)),
+    )(delayed(safe_simulate)(int(par)) for par in nonzero_parameters)
+
+    for r in results:
+        if not total_counts < bif_max:
+            break
+
         match r:
             case list(new_sims):
                 yield new_sims
@@ -198,87 +293,88 @@ def _gen_model(
                         continue
                     case _:
                         traceback.print_exception(r, file=stderr)
-    
-    for task in tasks:
-        task.cancel()
 
- 
 SOLVER_PARAMETERS: Final[dict[str, Any]] = {
     "tolerance": 1e-8,
     "hopf_detection": True,
+    "analyze_stability": False,
+    "initial_directions": "increase_p",
+    "limit_cycle_continuation": False,
+    "recursive_branching": False,
     "param_min": -5.0,
     "param_max": 5.0,
 }
 
+def _make_polynomial_field(pars: _2DArray, par: int) -> Callable[[np.ndarray, float], np.ndarray]:
+    coeffs = pars.copy()
+    a = coeffs[:10]
+    b = coeffs[10:]
+
+    def set_parameter(value: float):
+        if par < 10:
+            a[par] = value
+        else:
+            b[par - 10] = value
+
+    def field(u: np.ndarray, p: float) -> np.ndarray:
+        set_parameter(p)
+
+        x, y = u
+        x2 = x * x
+        y2 = y * y
+        xy = x * y
+
+        f1 = (
+            a[0] + a[1] * x + a[2] * y + a[3] * x2 + a[4] * xy +
+            a[5] * y2 + a[6] * x * x2 + a[7] * x2 * y + a[8] * x * y2 +
+            a[9] * y * y2
+        )
+        f2 = (
+            b[0] + b[1] * x + b[2] * y + b[3] * x2 + b[4] * xy +
+            b[5] * y2 + b[6] * x * x2 + b[7] * x2 * y + b[8] * x * y2 +
+            b[9] * y * y2
+        )
+
+        return np.array([f1, f2])
+
+    return field
+
+
 def _gen_branches_py(
         par: int,
         pars: _2DArray,
-        s0: _2DArray,
-        steps: int = 1000,
-    ) -> list[dict[str, Any]]:
-    pars = pars.copy()
-    
-    def G(u: np.ndarray, p: float):
-        pars[par] = p
-        
-        x, y = u
-        
-        a1,a2,a3,a4,a5,a6,a7,a8,a9,a10 = pars[:10]
-        b1,b2,b3,b4,b5,b6,b7,b8,b9,b10 = pars[10:]
-        
-        f1 = a1 + a2*x + a3*y + a4*x**2 + a5*x*y + a6*y**2 + a7*x**3 + a8*x**2*y + a9*x*y**2 + a10*y**3
-        f2 = b1 + b2*x + b3*y + b4*x**2 + b5*x*y + b6*y**2 + b7*x**3 + b8*x**2*y + b9*x*y**2 + b10*y**3
-        
-        return np.array([f1, f2])
-       
+        equilibrium: _2DArray,
+        steps: int = 500,
+    ) -> tuple[Callable[[np.ndarray, float], np.ndarray], list[dict[str, Any]]]:
+    field = _make_polynomial_field(pars, par)
+
     with np.errstate(invalid='ignore'):
         cont: ContinuationResult = pycont.arclengthContinuation(
-            G=G, u0=s0, p0=pars[par],
+            G=field, u0=equilibrium, p0=pars[par],
             ds_0=1e-02, ds_min=1e-03, ds_max=1e-01,
             n_steps=steps,
             solver_parameters=SOLVER_PARAMETERS,
             verbosity=pycont.Verbosity.OFF,
         )
 
-    return [
-        {
-            "kind": branch.termination_event.kind,
-            "s0": branch.u_path[len(branch.u_path) // 2],
-            "crit": branch.termination_event.p,
-            "rrate": abs(rightmost_eig_realpart(G, branch.termination_event.u, branch.termination_event.p, SOLVER_PARAMETERS))
-        }
-        for branch in cont.branches if branch.termination_event is not None and branch.stable is not False and branch.termination_event.kind in BIFS
-    ]      
+    if len(cont.branches) == 0:
+        return field, []
 
-def _sim_func(pars: _2DArray, par: int):
-    pars = pars.copy()
-    def de_fun(s: _2DArray, value: float) -> _2DArray:
-            pars[par] = value
-            '''
-            Input:
-            s is state vector
-            pars is dictionary of parameter values
-            
-            Output:
-            array [dxdt, dydt]
-            
-            '''
-            
-            # Polynomial forms up to third order
-            x, y = s
-            polys = np.array([1.0,x,y,x**2,x*y,y**2,x**3,x**2*y,x*y**2,y**3])
+    branch = cont.branches[0]
+    event = branch.termination_event
+    if event is None or event.kind not in BIFS:
+        return field, []
 
-            dxdt = np.dot(pars[10:], polys)
-            dydt = np.dot(pars[:10], polys)
-                        
-            return np.array([dxdt, dydt])
-        
-    return de_fun
+    return field, [{
+        "kind": event.kind,
+        "crit": event.p,
+    }]
 
 def _simulate(
         par: int,
         pars: _2DArray,
-        s0: _2DArray,
+        equilibrium: _2DArray,
+        rrate: float,
         ts_len: int,
         bif_max: int,
         total_counts: _AtomicCounts
@@ -310,8 +406,17 @@ def _simulate(
     series_len = ts_len + 200
     
     null_run = False
-        
-    for vals in _gen_branches_py(par, pars, s0):
+    de_fun, branches = _gen_branches_py(par, pars, equilibrium)
+
+    for vals in branches:
+        if not total_counts < bif_max:
+            break
+
+        needs_forced = _needs_sample(total_counts, (vals["kind"], False), bif_max)
+        needs_null = not null_run and _needs_sample(total_counts, (vals["kind"], True), bif_max)
+
+        if not (needs_forced or needs_null):
+            continue
              
         #-------------------
         ## Simulate models
@@ -319,14 +424,13 @@ def _simulate(
             
         # Construct noise as in Methods
         rv_tri = np.random.triangular(0.75,1,1.25)
-        # rv_tri = 1 # temporary
-        sigma = np.sqrt(2*vals["rrate"]) * sigma_tilde * rv_tri
+        sigma = np.sqrt(2 * rrate) * sigma_tilde * rv_tri
         
-        for null in [False, True] if not null_run else [True]:
+        for null in ((False, True) if not null_run else (False,)):
             
             bif_type: BifType = (vals["kind"], null)
             
-            if total_counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max):
+            if _needs_sample(total_counts, bif_type, bif_max):
                 b_start=pars[par]
                 b_end=vals["crit"]
                 
@@ -350,29 +454,33 @@ def _simulate(
                 )
                 
                 sim = simulator.simulate(
-                    de_fun=_sim_func(pars, par),
-                    s0=vals["s0"], 
+                    de_fun=de_fun,
+                    s0=equilibrium,
                     sigma=sigma,
                 )['p0']
                 
-                # Get the last non-NaN index
-                t_nan: Any = sim.last_valid_index()
-                if t_nan is None or t_nan < ts_len:
+                valid_positions = np.flatnonzero(sim.notna().to_numpy())
+                if len(valid_positions) == 0:
                     continue
+                last_valid_pos = int(valid_positions[-1])
+                if last_valid_pos + 1 < ts_len:
+                    continue
+
+                valid_sim = sim.iloc[:last_valid_pos + 1]
                 
                 # Detect a jump to another state (in time-series prior to infinity jump)
                 # Break points - higher penalty means less likely to detect jumps, get first jump
                 t_jump: int = ruptures.Window(width=10, model="l2", jump=1, min_size=2).fit(
-                    compute_residuals(sim.iloc[:t_nan], span = 0.2).to_numpy().T
+                    compute_residuals(valid_sim, span=0.2).to_numpy().reshape(-1, 1)
                 ).predict(pen=1, n_bkps=1)[0] - 1 # type: ignore
                 
                 # Output minimum of tnan or tjump
-                transit_time = min(t_nan,t_jump)
+                transit_pos = min(last_valid_pos, t_jump)
                 
-                if transit_time > ts_len:
-                    sim = sim.iloc[-ts_len:]
-                    # Have time-series start at time t=0
-                    sim.index -= sim.index[0]
+                if transit_pos + 1 >= ts_len:
+                    start = transit_pos + 1 - ts_len
+                    sim = sim.iloc[start:transit_pos + 1].copy()
+                    sim.index = np.arange(len(sim))
                     sims.append((
                         # Simulations
                         sim,
@@ -443,6 +551,7 @@ def batch(
     ts_len: int, 
     bif_max: int,
     path: Union[None, str] = None,
+    param_jobs: int | None = None,
     ) -> TrainData:
     
     print("Batch", batch_num, "start")
@@ -484,9 +593,9 @@ def batch(
     print("Batch", batch_num, "loaded", len(simulations), "previous simulations")
     
     current = max(simulations.keys()) + 1 if len(simulations) != 0 else 1
-    
-    pool = ThreadPoolExecutor()
-    
+    if param_jobs is None:
+        param_jobs = os.cpu_count() or 1
+
     while counts < bif_max:
         added: set[BifType] = set()
         
@@ -494,11 +603,12 @@ def batch(
             ts_len=ts_len,
             bif_max=bif_max,
             total_counts=counts,
-            pool=pool,
+            param_jobs=param_jobs,
         ):
             for result in results:
                 biftype = result[1]
-                if counts.count(biftype) < bif_maximum(type=biftype, bif_max=bif_max) and not (any((t, True) in added for t in BIFS) if type[1] else type in added):
+                already_added = any((t, True) in added for t in BIFS) if biftype[1] else biftype in added
+                if _needs_sample(counts, biftype, bif_max) and not already_added:
                     simulations[current] = result
                     counts.inc(biftype)
                     added.add(biftype)
@@ -537,7 +647,6 @@ def multibatch(
         batches: Sequence[int], 
         ts_len: int,
         bif_max: int,
-        batch_pool: Executor, 
         path: Union[str, None] = None,
     ) -> TrainData:
         
@@ -548,19 +657,25 @@ def multibatch(
         raise ValueError("Please provide a non empty batch list!")
 
     if len(batches) > 1:
-        return combine_batches(batch_pool.map(
-            batch, 
-            batches, 
-            [ts_len] * len(batches), 
-            [bif_max] * len(batches), 
-            [path] * len(batches),
-        ))  
-    else: 
+        batch_jobs = min(len(batches), os.cpu_count() or 1)
+        param_jobs = max(1, (os.cpu_count() or 1) // batch_jobs)
+        return combine_batches(Parallel(n_jobs=batch_jobs, backend="loky")(
+            delayed(batch)(
+                batch_num=batch_num,
+                ts_len=ts_len,
+                bif_max=bif_max,
+                path=path,
+                param_jobs=param_jobs,
+            )
+            for batch_num in batches
+        ))
+    else:
         return batch(
             batch_num=batches[0],
             ts_len=ts_len, 
             bif_max=bif_max,
             path=path,
+            param_jobs=os.cpu_count() or 1,
         )
     
 _DEFAULT_BIF_MAX = 1000
@@ -570,43 +685,14 @@ def run_with_args(
     bif_max: int = _DEFAULT_BIF_MAX,
     output: str | None = None
 ):
-    
-    import sys
-    import threading
-            
-    class SelectOutput():
-        out = sys.stdout
-
-        def write(self, text: Any):
-            if threading.current_thread().name == "printer":
-                self.out.write(text)
-
-        def flush(self):
-            self.out.flush()
-            
-    sys.stdout = SelectOutput()
-        
-    def set_printer_thread():
-        threading.current_thread().name = "printer"
-        
-    pool = concurrent.futures.ProcessPoolExecutor(initializer=set_printer_thread)
-    
-    if len(batches) == 1:
-        set_printer_thread()
-
-    import atexit
-    atexit.register(lambda: pool.shutdown(wait=False, cancel_futures=True))
-
     return multibatch(
-        batch_pool=pool, 
         batches=batches, 
         ts_len=ts_len, 
         bif_max=bif_max,
         path=output,
     )
     
-if __name__ == "__main__":
-        
+def _main() -> None:
     import argparse
     parser = argparse.ArgumentParser(
                     prog='LSTM Training Data Generator',
@@ -617,5 +703,13 @@ if __name__ == "__main__":
     parser.add_argument('-l', '--length', type=int)
     parser.add_argument('-m', '--bifurcations', type=int, default=_DEFAULT_BIF_MAX)
     args = parser.parse_args()
-    
-    run_with_args(ts_len=args.length, batches=list(range(args.batch_start, args.batch_start + args.batches)), bif_max=args.bifurcations, output=args.output)
+
+    run = run_with_args
+    if __name__ == "__main__" and __spec__ is not None and __spec__.name != __name__:
+        import importlib
+        run = importlib.import_module(__spec__.name).run_with_args
+
+    run(ts_len=args.length, batches=list(range(args.batch_start, args.batch_start + args.batches)), bif_max=args.bifurcations, output=args.output)
+
+if __name__ == "__main__":
+    _main()

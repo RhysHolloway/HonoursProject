@@ -11,7 +11,7 @@ DIR=$(dirname ${BASH_SOURCE[0]})
 
 cd $DIR
 git fetch origin && git pull
-source env.sh
+source setup.sh
 python -m models.run
 
 cd $OLD_DIR

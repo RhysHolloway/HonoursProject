@@ -4,7 +4,7 @@ This repository contains code to reproduce data and results in Rhys Holloway's h
 
 ## Setup
 
-Before running code, a local environment for the project can be both activated with the Bash shell script `env.sh`, which when called with the command `source env.sh` activates the environment.
+Before running code, a local environment for the project can be setup with the Bash shell script `setup.sh`, which when called with the command `source setup.sh` activates the environment.
 
 During the first run the script creates a virtual Python environment and downloads the required libraries.
 
