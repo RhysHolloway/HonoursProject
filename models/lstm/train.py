@@ -12,26 +12,83 @@ Modified model training script for the tipping point-detecting deep learning mod
 import os
 import os.path
 import random
-from typing import Final, Literal, Union
+from typing import Callable, Final, Literal
 import numpy as np
 import pandas as pd
 
-import atomics
-from concurrent.futures import ThreadPoolExecutor
+from joblib import Parallel, delayed
 
-from .. import compute_residuals
-from ..metrics import Metrics
-from ..lstm import INDEX_COL, Sims, TrainData, combine_batches
+from .. import compute_residuals, index_values
+from ..lstm import INDEX_COL, TrainData, combine_batches
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
-from keras.models import Sequential  # type: ignore
+from keras.models import load_model, Sequential  # type: ignore
 from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input  # type: ignore
 from keras.optimizers import Optimizer, Adam
-from keras.callbacks import EarlyStopping, ModelCheckpoint  # type: ignore
+from keras.callbacks import ModelCheckpoint  # type: ignore
 from keras.losses import SparseCategoricalCrossentropy
 
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score, classification_report
+
+def make_fast_lowess_residualizer(index: pd.Index, span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
+    from scipy import sparse
+
+    x = index_values(index)
+    n = len(x)
+    if n == 0:
+        return lambda data: np.empty(0, dtype=float)
+
+    frac = span if 0 < span <= 1 else span / n
+    window = min(n, max(2, int(np.ceil(frac * n))))
+
+    rows: list[int] = []
+    cols: list[int] = []
+    weights: list[float] = []
+
+    for row, x0 in enumerate(x):
+        distances = np.abs(x - x0)
+        neighbour_idx = np.argpartition(distances, window - 1)[:window]
+        h = distances[neighbour_idx].max()
+        if h == 0:
+            rows.append(row)
+            cols.append(row)
+            weights.append(1.0)
+            continue
+
+        xdiff = x[neighbour_idx] - x0
+        local_weights = (1 - (np.abs(xdiff) / h) ** 3) ** 3
+        valid = local_weights > 0
+        neighbour_idx = neighbour_idx[valid]
+        xdiff = xdiff[valid]
+        local_weights = local_weights[valid]
+
+        s0 = local_weights.sum()
+        s1 = np.dot(local_weights, xdiff)
+        s2 = np.dot(local_weights, xdiff * xdiff)
+        denom = s0 * s2 - s1 * s1
+
+        if denom == 0:
+            row_weights = local_weights / s0
+        else:
+            row_weights = local_weights * (s2 - s1 * xdiff) / denom
+
+        rows.extend([row] * len(neighbour_idx))
+        cols.extend(neighbour_idx.tolist())
+        weights.extend(row_weights.tolist())
+
+    smoother = sparse.csr_matrix((weights, (rows, cols)), shape=(n, n), dtype=float)
+
+    def residualize(data: pd.Series) -> np.ndarray:
+        state = data.to_numpy(dtype=float, copy=False)
+        if len(state) != n:
+            raise ValueError(f"FastLowess residualizer expected length {n}, got {len(state)}")
+        if not np.isfinite(state).all():
+            return compute_residuals(data, span=span, type="Lowess").to_numpy(dtype=float, copy=True)
+        return state - smoother.dot(state)
+
+    return residualize
+
 
 _DEFAULT_EPOCHS = 500
 _DEFAULT_PATIENCE = 50
@@ -41,17 +98,18 @@ def train(
     pad: Literal["lpad", "lrpad"],
     name: str = "best_model",
     epochs: int = _DEFAULT_EPOCHS,
-    patience: int = _DEFAULT_PATIENCE,
-    batch_size: int = 32,
+    batch_size: int = 1000,
     filters: int = 50,
     kernel_size: int = 12,
     kernel_initializer: str = 'lecun_normal',
-    optimizer: Optimizer = Adam(learning_rate = 0.0005),
+    optimizer: Optimizer | None = None,
+    jobs: int = -1,
     verbose: bool = True,
 ) -> Sequential:
     sims, df_labels, df_groups = data
     labels = pd.merge(df_groups, df_labels, left_index=True, right_index=True)
     ts_len = len(next(iter(sims.values())))
+    optimizer = optimizer or Adam(learning_rate = 0.0005)
         
     match pad:
         case "lrpad":
@@ -63,44 +121,71 @@ def train(
         case _:
             raise ValueError("Please provide valid type as input: lrpad, lpad")
     
-    
-    def format_name(object: str, ext: str):
-        return f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.{ext}"
+    os.makedirs(output, exist_ok=True)
+
+    def format_name(stem: str, ext: str) -> str:
+        pad_id = 1 if pad == "lrpad" else 2
+        return f"{stem}_{pad_id}_len{ts_len}.{ext}"
     
     model_name = format_name(name, "keras")
+    model_path = os.path.join(output, model_name)
     
     print("Computing training data from simulations...")
 
-    # apply train/test/validation labels
+    residualize = make_fast_lowess_residualizer(next(iter(sims.values())).index)
     
-    counter = atomics.atomic(width=4, atype=atomics.UINT)
-    counter.store(0)
-    
-    def to_traindata(tsid: int) -> np.ndarray:
-        values = compute_residuals(sims[tsid]).to_numpy()
+    def to_traindata(tsid: int) -> tuple[int, np.ndarray]:
+        values = np.array(residualize(sims[tsid]), dtype=float, copy=True)
         
         # Padding and normalizing input sequences
-        values[:int(pad_left * random.uniform(0, 1))] = 0
-        values[len(values)-int(pad_right * random.uniform(0, 1)):] = 0
+        left_padding = int(pad_left * random.random())
+        right_padding = int(pad_right * random.random())
+        if left_padding > 0:
+            values[:left_padding] = 0
+        if right_padding > 0:
+            values[-right_padding:] = 0
         
-        avg = np.sum(np.abs(values)) / np.count_nonzero(values)
+        nonzero = values != 0
+        avg = np.mean(np.abs(values[nonzero])) if np.any(nonzero) else 1.0
+        if not np.isfinite(avg) or avg == 0:
+            avg = 1.0
         
-        values = values / avg
-        
-        num = counter.fetch_inc() + 1
-        if num > 0 and num % 100 == 0:
-            print("Calculated", num, "residuals out of", len(sims))    
-        
-        return values
+        return tsid, (values / avg).astype(np.float32, copy=False)
+
+    sequence_ids = labels.index.to_numpy(dtype=int)
+    total_sequences = len(sequence_ids)
+
+    prepared_results = Parallel(
+        n_jobs=jobs,
+        backend="threading",
+        prefer="threads",
+        require="sharedmem",
+        return_as="generator",
+    )(
+        delayed(to_traindata)(tsid)
+        for tsid in sequence_ids
+    )
     
-    pool = ThreadPoolExecutor()
-    labelled_seq = lambda label: np.array(list(pool.map(to_traindata, labels[labels["dataset_ID"] == label].index)))
+    print("Calculating", total_sequences, "residuals")
+    
+    
+    prepared: dict[int, np.ndarray] = {tsid:values for tsid, values in prepared_results} # type: ignore
+
+    def sequence_ids_for(dataset_id: int) -> np.ndarray:
+        return labels.index[labels["dataset_ID"] == dataset_id].to_numpy(dtype=int)
+
+    def labelled_seq(dataset_id: int) -> np.ndarray:
+        ids = sequence_ids_for(dataset_id)
+        if len(ids) == 0:
+            return np.empty((0, ts_len, 1), dtype=np.float32)
+        return np.stack([prepared[tsid] for tsid in ids]).reshape(len(ids), ts_len, 1)
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
     test = labelled_seq(3)
     
-    labelled_class_seq = lambda label: labels[labels["dataset_ID"] == label]["class_label"].to_numpy()
+    def labelled_class_seq(dataset_id: int) -> np.ndarray:
+        return labels.loc[sequence_ids_for(dataset_id), "class_label"].to_numpy(dtype=np.int64)
     
     train_target = labelled_class_seq(1)
     validation_target = labelled_class_seq(2)
@@ -122,6 +207,7 @@ def train(
         LSTM(50, return_sequences=True, kernel_initializer = kernel_initializer),
         Dropout(0.1),
         LSTM(10, kernel_initializer = kernel_initializer),
+        Dropout(0.1),
         Dense(4, activation='softmax', kernel_initializer = kernel_initializer)
     ])
 
@@ -141,26 +227,24 @@ def train(
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[
-            ModelCheckpoint(model_name, monitor=MONITOR, save_best_only=True, mode="max", verbose=1 if verbose else 0),
-            EarlyStopping(monitor=MONITOR, patience=patience, restore_best_weights=True), 
+            ModelCheckpoint(model_path, monitor=MONITOR, save_best_only=True, mode="max", verbose=1 if verbose else 0),
         ],
         validation_data=(validation, validation_target),
         verbose="auto" if verbose else 0, # type: ignore
     )
     
-    print("Outputting model...")
-    
-    os.makedirs(output, exist_ok=True)
-    model.save(os.path.join(output, model_name))
+    print("Loading best model checkpoint...")
+
+    model: Sequential = load_model(model_path) # type: ignore[assignment]
     
     print("Testing model...")
     
     # generate test metrics
 
-    test_preds = model.predict(test).argmax(axis=-1)
-    accuracy_score(test_target, test_preds)
+    test_preds = model.predict(test, batch_size=256).argmax(axis=-1)
+    accuracy = accuracy_score(test_target, test_preds)
     
-    output = f"""Simulation: 
+    summary = f"""Simulation:
         Time Series Length: {ts_len}
         Epochs: {epochs}
         Kernel size: {kernel_size}
@@ -171,11 +255,17 @@ def train(
         pad_left: {pad_left}
         pad_right: {pad_right}
         
+        accuracy: {accuracy}
         macro f1: {f1_score(test_target, test_preds, average="macro")}
         macro avg precision: {precision_score(test_target, test_preds, average="macro")}
         macro avg recall: {recall_score(test_target, test_preds, average="macro")}
+        
+        last accuracy: {history.history["accuracy"][-1]}
+        validation accuracy: {history.history["val_accuracy"][-1]}
+        loss: {history.history["loss"][-1]}
+        validation loss: {history.history["val_loss"][-1]}
         """
-    print(output)
+    print(summary)
     print(classification_report(test_target, test_preds, digits=3))
     print(history.history["accuracy"])
     print(history.history["val_accuracy"])
@@ -183,8 +273,8 @@ def train(
     print(history.history["val_loss"])
     print("Confusion matrix: \n", confusion_matrix(test_target, test_preds))# keeps track of training metrics
 
-    with open(format_name("training_results", "txt"), "w") as results:
-        results.write(output)
+    with open(os.path.join(output, format_name("training_results", "txt")), "w") as results:
+        results.write(summary)
         results.flush()
         
     return model
@@ -194,14 +284,25 @@ def train(
 
 if __name__ == "__main__":
     
-    def _read_batch(dir) -> TrainData:
+    def _read_batch(dir: str, jobs: int = 1) -> TrainData:
         print(f"Reading {dir}...")
         groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
         
         if len(groups) == 0:
             raise RuntimeError("Empty labels file!")
 
-        sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['p0'] for seq_id in groups.index.values}
+        def read_sim(seq_id: int) -> tuple[int, pd.Series]:
+            return seq_id, pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['p0']
+
+        sims = dict(Parallel(
+            n_jobs=jobs,
+            backend="threading",
+            prefer="threads",
+            require="sharedmem",
+        )(
+            delayed(read_sim)(int(seq_id))
+            for seq_id in groups.index.values
+        ))
         labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL)
         print("Read", dir)
         return sims, labels, groups
@@ -211,12 +312,12 @@ if __name__ == "__main__":
                     prog='LSTM Model Trainer',
                     description='Trains models on generated data')
     parser.add_argument('input', type=str, help="Path to a folder containing batches or a generated batch")
-    parser.add_argument('--train', '-t', type=int, nargs=2, help="Generate the set of training data before training the model.")
+    parser.add_argument('--train', '-t', type=int, nargs="+", help="Generate the set of training data before training the model.")
     parser.add_argument('--pad', '-p', type=str, help="Type of zero-padding to use training the model", default="lrpad")
     parser.add_argument('--name', '-n', type=str, help="Model file name", default="best_model")
     parser.add_argument('--output', '-o', type=str, help="Folder path to output models. If not provided, defaults to placing model beside training data.")
     parser.add_argument('--epochs', '-e', type=int, help="Number of epochs to train the model for", default=_DEFAULT_EPOCHS)
-    parser.add_argument('--patience', '-c', type=int, help="Cancel training after a given number of epochs if the model does not improve since then", default=_DEFAULT_PATIENCE)
+    parser.add_argument('--jobs', '-j', type=int, help="Number of joblib worker threads to use for data preparation.", default=-1)
     
     args = parser.parse_args()
     
@@ -238,12 +339,20 @@ if __name__ == "__main__":
         try:
             entries = os.listdir(input)
             if "groups.csv" in entries:
-                batches = _read_batch(input)
+                data = _read_batch(input, jobs=args.jobs)
             else:
-                batches = [entry for entry in entries if os.path.exists(os.path.join(input, entry, "groups.csv"))]
-                if len(batches) == 0:
+                batch_dirs = sorted(entry for entry in entries if os.path.exists(os.path.join(input, entry, "groups.csv")))
+                if len(batch_dirs) == 0:
                     raise RuntimeError(f"Input folder {input} contains no batches in entries: {entries}")
-                batches = [_read_batch(os.path.join(input, entry)) for entry in entries] 
+                batches = Parallel(
+                    n_jobs=args.jobs,
+                    backend="threading",
+                    prefer="threads",
+                    require="sharedmem",
+                )(
+                    delayed(_read_batch)(os.path.join(input, entry), 1)
+                    for entry in batch_dirs
+                )
                 ts_len = len(next(iter(batches[0][0].values())))
                 if not all(ts_len == len(next(iter(b[0].values()))) for b in batches):
                     raise RuntimeError(f"Input series lengths are different!")
@@ -258,5 +367,5 @@ if __name__ == "__main__":
         name=args.name,
         output=output,
         epochs=args.epochs,
-        patience=args.patience,
+        jobs=args.jobs,
     )

@@ -9,7 +9,9 @@ trap on_exit INT
 
 DIR=$(dirname ${BASH_SOURCE[0]})
 
-BATCHES=25
+BATCHES_500=${BATCHES_500:-125}
+BATCHES_1500=${BATCHES_1500:-50}
+JOBS=${JOBS:-${SLURM_CPUS_PER_TASK:--1}}
 
 cd $DIR
 git fetch origin && git pull
@@ -17,12 +19,16 @@ source setup.sh
 
 for len in 500 1500 ;
 do
+    case "$len" in
+        500) BATCHES=$BATCHES_500 ;;
+        1500) BATCHES=$BATCHES_1500 ;;
+    esac
     echo Training 20 models of length $len on $((4000*$BATCHES)) time series...
     for n in $(seq 1 10);
     do
         for pad in lrpad lpad ;
         do
-            python -m models.lstm.train env/training/len$len/ -o output/models/lstm/len$len/ -n best_model_$n --pad $pad --train $len $BATCHES
+            python -m models.lstm.train env/training/len$len/ -o output/models/lstm/len$len/ -n best_model_$n --pad $pad --train $len $BATCHES --residuals FastLowess --jobs "$JOBS"
         done
     done
 done

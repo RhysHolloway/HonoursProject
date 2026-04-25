@@ -12,11 +12,18 @@ import abc
 type Column = str | Sequence[str]
 type FeatureColumns = dict[Column, str] | Sequence[Column]
 
-def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussian", "Lowess"] = "Lowess") -> pd.Series:
+type DetrendMethod = Literal["Gaussian", "Lowess"]
+
+def index_values(index: pd.Index) -> np.ndarray:
+    if "time" in index.names:
+        return index.get_level_values("time").to_numpy(dtype=float, copy=False)
+    return index.to_numpy(dtype=float, copy=False)
+
+def compute_residuals(data: pd.Series, span: float = 0.2, type: DetrendMethod = "Lowess") -> pd.Series:
     from scipy.ndimage import gaussian_filter
     from statsmodels.nonparametric.smoothers_lowess import lowess
     smoothing: np.ndarray
-    state = data.to_numpy()
+    state = data.to_numpy(dtype=float, copy=False)
     match type:
         case "Gaussian":
             # Standard deviation of kernel given bandwidth
@@ -25,10 +32,15 @@ def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussia
             smoothing = gaussian_filter(data, sigma=(0.25 / 0.675) * span, mode="reflect")
         case "Lowess":
             span = span if 0 < span <= 1 else span / len(data)
-            smoothing = lowess(state, data.index.get_level_values("time").to_numpy(), frac=span, return_sorted=False)
+            x = index_values(data.index)
+            smoothing = lowess(state, x, frac=span, is_sorted=_is_sorted(x), return_sorted=False)
         case _:
             raise ValueError(f"Invalid detrending type: {type}")
     return pd.Series(state - smoothing, index=data.index, name="residuals")
+
+
+def _is_sorted(values: np.ndarray) -> bool:
+    return len(values) < 2 or bool(np.all(values[:-1] <= values[1:]))
 
 def space_indices(series: pd.Series, spacing: int) -> list[int]:
     first = series.first_valid_index()
