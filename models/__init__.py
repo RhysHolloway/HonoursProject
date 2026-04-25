@@ -16,7 +16,7 @@ def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussia
     from scipy.ndimage import gaussian_filter
     from statsmodels.nonparametric.smoothers_lowess import lowess
     smoothing: np.ndarray
-    data = pd.Series(data, index=data.index.get_level_values("time"))
+    state = data.to_numpy()
     match type:
         case "Gaussian":
             # Standard deviation of kernel given bandwidth
@@ -25,10 +25,10 @@ def compute_residuals(data: pd.Series, span: float = 0.2, type: Literal["Gaussia
             smoothing = gaussian_filter(data, sigma=(0.25 / 0.675) * span, mode="reflect")
         case "Lowess":
             span = span if 0 < span <= 1 else span / len(data)
-            smoothing = lowess(data.to_numpy(), data.index.to_numpy(), frac=span, return_sorted=False)
+            smoothing = lowess(state, data.index.get_level_values("time").to_numpy(), frac=span, return_sorted=False)
         case _:
             raise ValueError(f"Invalid detrending type: {type}")
-    return pd.Series(data.to_numpy() - smoothing, index=data.index, name="residuals")
+    return pd.Series(state - smoothing, index=data.index, name="residuals")
 
 def space_indices(series: pd.Series, spacing: int) -> list[int]:
     first = series.first_valid_index()
@@ -109,6 +109,13 @@ class Dataset:
             df=df,
         )
     
+            
+    def rename(self: Self, name: str) -> Self:
+        return self.__class__(
+            name=name or self.name,
+            df=self.df,
+        )
+    
     def split(self: Self, features: dict[str, FeatureColumns]) -> dict[str, Self]:
         
         def map(name: str, columns: FeatureColumns) -> Self:
@@ -154,7 +161,8 @@ class Dataset:
         if df_sel.empty:
             raise ValueError("No rows with usable feature values after imputation. Check your data and feature selection.")
         
-        df_sel = df_sel.groupby(age_col, as_index=False).mean(numeric_only=True).set_index(age_col) # type: ignore
+        # df_sel = df_sel.groupby(age_col, as_index=False).mean(numeric_only=True)
+        df_sel = df_sel.set_index(age_col) # type: ignore
         df_sel.index.name = "time"
 
         return df_sel

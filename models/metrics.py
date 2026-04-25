@@ -101,26 +101,23 @@ class Metrics(Model[pd.DataFrame]):
         self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys())) # type: ignore               
     
     def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
-        fig = __class__.plot(self.results[dataset])
+        ROWS = 2
+        fig, axes = pyplot.subplots(nrows=ROWS, sharex = True)
+        __class__.plot(axes, self.results[dataset])
         if title:
             fig.suptitle("Metrics of " + dataset.name)
         fig.tight_layout()
         return fig
     
     @staticmethod
-    def plot(df: pd.DataFrame) -> Figure:
-        ROWS = 2
-        fig, axs = pyplot.subplots(nrows=ROWS, sharex = True)
+    def plot(axs: Sequence[Axes], df: pd.DataFrame):
+        time = df.index.get_level_values("time")
+        axs[-1].set_xlabel(f"Age (ya BP)")
 
         def plot(data: pd.Series, title: str, i: int):
             axs[i].set_ylabel(title)
             axs[i].invert_xaxis()
-            time = data.index.get_level_values("time")
-            if i == ROWS - 1:
-                axs[i].set_xlabel(f"Age ({Dataset.age_format(time.to_numpy())})")
             axs[i].plot(time, data.to_numpy(), label=title)
                     
         plot(df["variance"], "Variance", 0)
         plot(df["ac1"], "AC-1", 1)
-
-        return fig

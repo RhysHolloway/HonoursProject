@@ -13,6 +13,7 @@ if __name__ == "__main__":
     PLOT_OUTPUT = get_project_path("output/plots")
     
     lstm.with_args(verbose=True, window=35).run_with_output([Lisiecki], PLOT_OUTPUT, title=False)
+    lstm.with_args(window=120).run_with_output([BuryEndYoungerDryas2], PLOT_OUTPUT, title=False)
     
     print("Generating project figures from data...")
     test.load_and_save(

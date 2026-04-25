@@ -480,7 +480,7 @@ def _simulate(
                 if transit_pos + 1 >= ts_len:
                     start = transit_pos + 1 - ts_len
                     sim = sim.iloc[start:transit_pos + 1].copy()
-                    sim.index = np.arange(len(sim))
+                    sim.index = pd.Index(np.arange(len(sim)), name="time")
                     sims.append((
                         # Simulations
                         sim,
@@ -577,7 +577,7 @@ def batch(
                 biftype: BifType = (bif, null)
                 if counts.count(biftype) < bif_maximum(biftype, bif_max):
                     
-                    sim = pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv"))[0]
+                    sim = pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv"), index_col="time")["p0"]
                     
                     if len(sim) != ts_len:
                         raise RuntimeError(f"Batch {batch_num} loaded simulation {seq_id} with non-matching length {len(sim)}! (expected {ts_len})")

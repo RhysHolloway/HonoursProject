@@ -159,8 +159,10 @@ BuryPaleoclimate = [
         dataset.df.columns[0],
         tcrit,
         bandwidth,
-        detrend="Lowess",
+        detrend="Gaussian",
         window=0.5,
     )
     for dataset, tcrit, bandwidth in BuryPaleoclimate
 ]
+
+BuryEndYoungerDryas2 = BuryEndYoungerDryas.rename(BuryEndYoungerDryas.name + "2")

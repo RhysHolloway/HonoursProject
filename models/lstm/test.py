@@ -5,6 +5,7 @@ import traceback
 from typing import Any, Callable, Final, Iterable, Literal, Self, Sequence, Tuple
 from joblib import Parallel, delayed
 from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
 from sklearn import metrics
@@ -547,7 +548,7 @@ def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = N
 def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.DataFrame, roc: pd.DataFrame, output: str, lstm: LSTM | None = None):
     
     groups = roc.groupby(["start", "end"])
-    fig, axes = plt.subplots(
+    roc_fig, roc_axes = plt.subplots(
         nrows=1,
         ncols=groups.ngroups,
         figsize=(4.0 * groups.ngroups, 5),
@@ -555,9 +556,9 @@ def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.Da
         constrained_layout=True,
     )
     
-    axes = axes.flatten()
+    roc_axes = roc_axes.flatten()
         
-    for axis, ((start, end), roc) in zip(axes, groups):
+    for axis, ((start, end), roc) in zip(roc_axes, groups):
         axis: Axes
         
         assert pd.api.types.is_float(start)
@@ -597,38 +598,50 @@ def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.Da
     # fig.suptitle()
     # fig.tight_layout()
     
-    if output is not None:
-        output = os.path.join(output, model.name)
-        os.makedirs(output, exist_ok=True)
-        fig.savefig(os.path.join(output, f"ROC {model.name} {kind}.png"))
-    else:
-        fig.show()
+    output = os.path.join(output, model.name)
+    os.makedirs(output, exist_ok=True)
+    roc_fig.savefig(os.path.join(output, f"ROC {model.name} {kind}.png"))
     
-    plt.close(fig)
+    plt.close(roc_fig)
+    
+    def get_plots() -> tuple[Figure, Sequence[Axes]]:
+        rows = 3 + (2 if lstm is not None else 0)
+        return plt.subplots(nrows = rows, sharex=True, figsize=(5, 10)) 
+    
+    forced_fig, forced_axes = get_plots()
+    null_fig, null_axes = get_plots()
     
     for forced, df in sims.groupby("forced", dropna=False):
         
-        forcing = "forced" if forced else "null"
+        axes = forced_axes if forced else null_axes
         
-        metrics_fig = Metrics.plot(df.groupby("time")[["variance", "ac1"]].mean())
-        # metrics_fig.suptitle(f"Metrics for {model.name} {forcing} {kind}")
-        metrics_fig.tight_layout()
-        metrics_fig.savefig(os.path.join(output, f"Metrics for {model.name} {forcing} {kind}.png"))
-        plt.close(metrics_fig)
+        means = df.groupby("time").mean()
+        means.index = means.index.get_level_values("time")
         
+        axes[0].plot(means["state"], alpha = 0.7)
+        axes[0].plot(means["state"] - means["residuals"])
+        axes[0].set_ylabel("State")
+        Metrics.plot(axes[1:3], means)
+    
     if lstm is not None:
         for forced, df in metrics.groupby("forced", dropna=False):
             
-            forcing = "forced" if forced else "null"
+            axes = forced_axes if forced else null_axes
             
-            lstm_fig = lstm.plot(
+            lstm.plot(
+                axes = axes[3:5],
                 means = lstm.calc_means(df),
                 reverse = False,
             )
             
-            lstm_fig.tight_layout()
-            lstm_fig.savefig(os.path.join(output, f"Bifurcation classifications on {model.name} {forcing} {kind}.png"))
-            plt.close(lstm_fig)
+    forced_fig.tight_layout()
+    forced_fig.savefig(os.path.join(output, f"Forced {model.name} {kind}.png"))
+    plt.close(forced_fig)
+    
+    null_fig.tight_layout()
+    null_fig.savefig(os.path.join(output, f"Null {model.name} {kind}.png"))
+    plt.close(null_fig)
+            
 
 def load_and_save(models: Iterable[TestModel], output: str, lstm: LSTM | None = None, metrics_path: str | None = None):
     for model in models:

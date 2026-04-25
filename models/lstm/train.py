@@ -38,7 +38,7 @@ _DEFAULT_PATIENCE = 50
 def train(
     data: TrainData,
     output: str,
-    type: Literal["lpad", "lrpad"],
+    pad: Literal["lpad", "lrpad"],
     name: str = "best_model",
     epochs: int = _DEFAULT_EPOCHS,
     patience: int = _DEFAULT_PATIENCE,
@@ -53,7 +53,7 @@ def train(
     labels = pd.merge(df_groups, df_labels, left_index=True, right_index=True)
     ts_len = len(next(iter(sims.values())))
         
-    match type:
+    match pad:
         case "lrpad":
             pad_left = (ts_len // 2) - 25
             pad_right = pad_left
@@ -67,7 +67,7 @@ def train(
     def format_name(object: str, ext: str):
         return f"{object}_{1 if type == "lrpad" else 2}_len{ts_len}.{ext}"
     
-    model_name = format_name("model", "keras")
+    model_name = format_name(name, "keras")
     
     print("Computing training data from simulations...")
 
@@ -83,7 +83,7 @@ def train(
         values[:int(pad_left * random.uniform(0, 1))] = 0
         values[len(values)-int(pad_right * random.uniform(0, 1)):] = 0
         
-        avg = sum(np.abs(values)) / np.count_nonzero(values)
+        avg = np.sum(np.abs(values)) / np.count_nonzero(values)
         
         values = values / avg
         
@@ -201,7 +201,7 @@ if __name__ == "__main__":
         if len(groups) == 0:
             raise RuntimeError("Empty labels file!")
 
-        sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['x'] for seq_id in groups.index.values}
+        sims = {seq_id:pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['p0'] for seq_id in groups.index.values}
         labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL)
         print("Read", dir)
         return sims, labels, groups
@@ -254,7 +254,7 @@ if __name__ == "__main__":
     
     train(
         data=data,  # type: ignore
-        type=args.type,  
+        pad=args.pad,  
         name=args.name,
         output=output,
         epochs=args.epochs,

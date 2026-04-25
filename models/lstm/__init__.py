@@ -190,29 +190,29 @@ class LSTM(Model[pd.DataFrame]):
     def calc_means(predictions: pd.DataFrame) -> pd.DataFrame:
         return predictions[__class__.COLUMNS].dropna().groupby("time").mean()
     
-    @staticmethod
-    def calc_peaks(
-        predictions: pd.DataFrame, 
-        means: pd.DataFrame | None = None, 
-        prominence: float = 0.05,
-        distance: int = 10,
-    ) -> LSTMPeaks:
+    # @staticmethod
+    # def calc_peaks(
+    #     predictions: pd.DataFrame, 
+    #     means: pd.DataFrame | None = None, 
+    #     prominence: float = 0.05,
+    #     distance: int = 10,
+    # ) -> LSTMPeaks:
         
-        def subset(df: pd.DataFrame) -> dict[Any, np.ndarray]:
-            from scipy.signal import find_peaks
-            return {
-                name:find_peaks(
-                    x=col.index.get_level_values("time"),
-                    height=col.to_numpy(),
-                    prominence=prominence,
-                    distance=distance
-                )[0] for name, col in df[__class__.COLUMNS[:-1]].items()
-            }
+    #     def subset(df: pd.DataFrame) -> dict[Any, np.ndarray]:
+    #         from scipy.signal import find_peaks
+    #         return {
+    #             name:find_peaks(
+    #                 x=col.index.get_level_values("time"),
+    #                 height=col.to_numpy(),
+    #                 prominence=prominence,
+    #                 distance=distance
+    #             )[0] for name, col in df[__class__.COLUMNS[:-1]].items()
+    #         }
         
-        peaks: dict[Any, Any] = {feature:subset(df) for feature, df in (predictions.groupby("variable") if "variable" in predictions.index.names else [(None, predictions)])} 
-        if means is not None:
-            peaks[None] = subset(means)
-        return peaks
+    #     peaks: dict[Any, Any] = {feature:subset(df) for feature, df in (predictions.groupby("variable") if "variable" in predictions.index.names else [(None, predictions)])} 
+    #     if means is not None:
+    #         peaks[None] = subset(means)
+    #     return peaks
 
     def means(
         self: Self,
@@ -224,16 +224,16 @@ class LSTM(Model[pd.DataFrame]):
             self.result_means[dataset] = self.calc_means(self.results[dataset])
         return self.result_means[dataset]
 
-    def peaks(
-        self: Self, 
-        dataset: Dataset, 
-        prominence: float = 0.05,
-        distance: int = 10,
-    ) -> LSTMPeaks:
-        if dataset not in self.result_peaks:
-            means = self.means(dataset)
-            self.result_peaks[dataset] = self.calc_peaks(self.results[dataset], means, prominence, distance)
-        return self.result_peaks[dataset]
+    # def peaks(
+    #     self: Self, 
+    #     dataset: Dataset, 
+    #     prominence: float = 0.05,
+    #     distance: int = 10,
+    # ) -> LSTMPeaks:
+    #     if dataset not in self.result_peaks:
+    #         means = self.means(dataset)
+    #         self.result_peaks[dataset] = self.calc_peaks(self.results[dataset], means, prominence, distance)
+    #     return self.result_peaks[dataset]
 
     def run(
         self: Self,
@@ -248,94 +248,80 @@ class LSTM(Model[pd.DataFrame]):
         
         self.results[dataset] = pd.concat(map(compute, dataset.df.columns))
 
-    @staticmethod                
-    def plot(legend: Iterable[str] | None = None, preds: pd.DataFrame | None = None, means: pd.DataFrame | None = None, peaks: LSTMPeaks | None = None, reverse: bool = True) -> Figure:
-           
-        if means is None and preds is None:
-            raise ValueError("Please provide either the means or the predictions to plot for the LSTM!")
+    @staticmethod
+    def _plot_prob(ax: Axes, feature: Any, col: str, df: pd.DataFrame, label: str | None = None):
+        data = df[col]
+        ax.plot(data.index.get_level_values("time"), data.to_numpy(), label=label)
         
-        def get_time(dfs: Iterable[pd.DataFrame | None]) -> np.ndarray[tuple[Any], np.dtype[np.number]]:
-            for df in dfs:
-                if df is not None:
-                    return (df.index.get_level_values("time") if "time" in df.index.names else df.index).to_numpy()
-            return np.array([])
-              
-        # AGE = f"Age ({Dataset.age_format(get_time([means, preds]))})"
-        AGE = "Age (ya)"
-          
+    @staticmethod                
+    def plot(axes: Sequence[Axes], means: pd.DataFrame, reverse: bool = True):
+        
+        last_ax = axes[-1]
+        means_ax = axes[-2]
+        
+        last_ax.set_xlabel("Age (ya BP)")
+        
+        last_ax.set_ylim(0, 1)
+        means_ax.set_ylim(0, 1)
+        
+        last_ax.set_ylabel("Probability")
+        means_ax.set_ylabel("Probability")
+
+        if reverse:
+            last_ax.xaxis.set_inverted(True)
+            means_ax.xaxis.set_inverted(True)
+        
+        means_ax.set_title("Bifurcation Probabilities")
+        for col in __class__.COLUMNS[:-1]:
+            __class__._plot_prob(means_ax, None, col, means, col)
+        means_ax.legend(
+            loc="center left",
+            bbox_to_anchor=(1, 0.5)
+        )
+        
+        bif_probs = means[__class__.COLUMNS[:-1]].set_index(means.index.get_level_values("time")).sum(axis=1)
+        last_ax.set_title("Probability of Any Bifurcation")
+        last_ax.plot(bif_probs, label="Bifurcation")
+        null = means[__class__.COLUMNS[-1]]
+        null.index = null.index.get_level_values("time")
+        last_ax.plot(null, label=null.name)
+        last_ax.legend(
+            loc="center left",
+            bbox_to_anchor=(1, 0.5)
+        )
+
+
+    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
+        
+        preds = self.results[dataset]
+        
         multivar = preds is not None and "variable" in preds.index.names and len(preds.index.get_level_values("variable").unique()) > 1
-          
-        fig, subplots = plt.subplots(
-            nrows=((len(__class__.COLUMNS) - 1 if multivar else 0) + (2 if means is not None else 0)), 
+        
+        fig, axes = plt.subplots(
+            nrows=((len(__class__.COLUMNS) - 1 if multivar else 0) + 2), 
             ncols=1, 
             width_ratios=[3], 
             sharex='all', 
             sharey='all',
         )
         
-        last_ax = subplots[-1]
-        last_ax.set_xlabel(AGE)
-        last_ax.set_ylim(0, 1)
-        
-        # fmt = ScalarFormatter(useOffset=False)
-        # fmt.set_scientific(False)
-        # last_ax.xaxis.set_major_formatter(fmt)
-
-        if reverse:
-            last_ax.invert_xaxis()
-        
-        def prob_plot(ax: Axes, feature: Any, col: str, df: pd.DataFrame, label: str | None = None):
-            data = df[col]
-            data.index = data.index.get_level_values("time")
-            ax.plot(data, label=label)
-            if peaks is not None:
-                indices = peaks[feature][col]
-                ax.scatter(x=data.index[indices], y=data.iloc[indices].to_numpy())
-        
-        if means is not None:
-            means_ax = subplots[-2]
-            means_ax.set_title("Average Bifurcation Probability for all features" if multivar else "Bifurcation Probabilities")
-            means_ax.set_ylabel("Probability")
-            for i, col in enumerate(__class__.COLUMNS[:-1]):
-                prob_plot(means_ax, None, col, means, col)
-            means_ax.legend(
-                loc="center left",
-                bbox_to_anchor=(1, 0.5)
-            )
-            
-            bif_probs = means[__class__.COLUMNS[:-1]].set_index(means.index.get_level_values("time")).sum(axis=1)
-            last_ax.set_title("Probability of Any Bifurcation")
-            last_ax.set_ylabel("Probability")
-            last_ax.plot(bif_probs, label="Bifurcation")
-            null = means[__class__.COLUMNS[-1]]
-            null.index = null.index.get_level_values("time")
-            last_ax.plot(null, label=null.name)
-            last_ax.legend(
-                loc="center left",
-                bbox_to_anchor=(1, 0.5)
-            )
+        __class__.plot(
+            axes=axes[0:2],
+            means=self.means(dataset), 
+            # peaks = self.peaks(dataset)
+        )
         
         if multivar:
+            axes[0].set_title("Average Bifurcation Probability for all features")
             for i, col in enumerate(__class__.COLUMNS[:-1]): # All besides null column
-                ax = subplots[i]
+                ax = axes[i]
                 ax.set_title(f"{col} Probability")
-                ax.set_xlabel(AGE)
+                ax.set_xlabel("Age (ya BP)")
                 ax.set_ylabel("Probability")
                 for feature, data in preds.groupby("variable"): # type: ignore
-                    prob_plot(ax, feature, col, data, str(feature))
-            if legend is not None:
-                fig.legend(legend)
+                    __class__._plot_prob(ax, feature, col, data, str(feature))
+                ax.legend()
         
-        fig.tight_layout()
-        return fig
-
-    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
-        fig = __class__.plot(
-            legend = dataset.feature_names(),
-            preds = self.results[dataset], 
-            means = self.means(dataset), 
-            peaks = self.peaks(dataset)
-        )
         if title:
             fig.suptitle("Bifurcation classifications on " + dataset.name)
         fig.tight_layout()
