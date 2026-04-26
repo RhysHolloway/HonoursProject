@@ -6,7 +6,8 @@ if __name__ == "__main__":
     
     # Run LSTM model on new datasets and generate figures
     
-    lstm = LSTMLoader(get_project_path("output/models/lstm/"))
+    # Change to output/models/lstm/ for generated models
+    lstm = LSTMLoader(get_project_path("data/bury_models/"))
     
     PLOT_OUTPUT = get_project_path("output/plots")
     
