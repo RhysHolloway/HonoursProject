@@ -8,11 +8,20 @@ import numpy as np
 import pandas as pd
 import time
 import abc
+import os.path
 
 type Column = str | Sequence[str]
 type FeatureColumns = dict[Column, str] | Sequence[Column]
 
 type DetrendMethod = Literal["Gaussian", "Lowess"]
+
+# Get root project path
+def get_project_path(path: str):
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), path).replace("\\", "/")
+    dir = os.path.dirname(path)
+    if not os.path.exists(dir):
+            os.makedirs(dir)
+    return path
 
 def index_values(index: pd.Index) -> np.ndarray:
     if "time" in index.names:

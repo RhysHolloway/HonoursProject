@@ -4,6 +4,7 @@ import shutil
 import os
 import re
 
+# Update models from bury paper (dl_train/best_models/tf215/len$LEN) for use with newer tensorflow versions
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(

@@ -1,14 +1,10 @@
 import functools
-import itertools
-from typing import Any, Final, Self, Sequence, Callable, Iterable, Literal, Tuple, TypeVar
-
-from matplotlib.ticker import ScalarFormatter
-from models import Column, Dataset, Model
+from typing import Any, Final, Self, Sequence, Callable, Iterable, Literal, Tuple
 
 from joblib import Parallel, delayed
 import numpy as np
 import pandas as pd
-from .. import compute_residuals, iter_progress, space_indices
+from .. import Column, Dataset, Model, compute_residuals, iter_progress, space_indices
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes

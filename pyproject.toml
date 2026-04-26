@@ -20,6 +20,8 @@ dependencies = [
     "ruptures==1.1.10",
     "statsmodels==0.14.6",
 ]
+[tool.setuptools.package-dir]
+"" = "src"
 
 [tool.setuptools.packages.find]
-include = ["models*"]
+where = ["src"]

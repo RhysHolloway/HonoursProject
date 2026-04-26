@@ -28,7 +28,7 @@ do
     do
         for pad in lrpad lpad ;
         do
-            python -m models.lstm.train env/training/len$len/ -o output/models/lstm/len$len/ -n best_model_$n --pad $pad --train $len $BATCHES --residuals FastLowess --jobs "$JOBS"
+            python -m src.lstm.train env/training/len$len/ -o output/models/lstm/len$len/ -n best_model_$n --pad $pad --train $len $BATCHES --jobs "$JOBS"
         done
     done
 done

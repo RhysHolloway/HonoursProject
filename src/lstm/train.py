@@ -19,7 +19,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .. import compute_residuals, index_values
-from ..lstm import INDEX_COL, TrainData, combine_batches
+from . import INDEX_COL, TrainData, combine_batches
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
@@ -31,7 +31,7 @@ from keras.losses import SparseCategoricalCrossentropy
 
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score, classification_report
 
-def make_fast_lowess_residualizer(index: pd.Index, span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
+def _make_fast_lowess_residualizer(index: pd.Index, span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
     from scipy import sparse
 
     x = index_values(index)
@@ -90,8 +90,8 @@ def make_fast_lowess_residualizer(index: pd.Index, span: float = 0.2) -> Callabl
     return residualize
 
 
-_DEFAULT_EPOCHS = 500
-_DEFAULT_PATIENCE = 50
+_DEFAULT_EPOCHS = 1500
+
 def train(
     data: TrainData,
     output: str,
@@ -99,17 +99,12 @@ def train(
     name: str = "best_model",
     epochs: int = _DEFAULT_EPOCHS,
     batch_size: int = 1000,
-    filters: int = 50,
-    kernel_size: int = 12,
-    kernel_initializer: str = 'lecun_normal',
-    optimizer: Optimizer | None = None,
     jobs: int = -1,
     verbose: bool = True,
 ) -> Sequential:
     sims, df_labels, df_groups = data
     labels = pd.merge(df_groups, df_labels, left_index=True, right_index=True)
     ts_len = len(next(iter(sims.values())))
-    optimizer = optimizer or Adam(learning_rate = 0.0005)
         
     match pad:
         case "lrpad":
@@ -124,15 +119,14 @@ def train(
     os.makedirs(output, exist_ok=True)
 
     def format_name(stem: str, ext: str) -> str:
-        pad_id = 1 if pad == "lrpad" else 2
-        return f"{stem}_{pad_id}_len{ts_len}.{ext}"
+        return f"{stem}_{1 if pad == "lrpad" else 2}_len{ts_len}.{ext}"
     
     model_name = format_name(name, "keras")
     model_path = os.path.join(output, model_name)
     
     print("Computing training data from simulations...")
 
-    residualize = make_fast_lowess_residualizer(next(iter(sims.values())).index)
+    residualize = _make_fast_lowess_residualizer(next(iter(sims.values())).index)
     
     def to_traindata(tsid: int) -> tuple[int, np.ndarray]:
         values = np.array(residualize(sims[tsid]), dtype=float, copy=True)
@@ -152,10 +146,9 @@ def train(
         
         return tsid, (values / avg).astype(np.float32, copy=False)
 
-    sequence_ids = labels.index.to_numpy(dtype=int)
-    total_sequences = len(sequence_ids)
-
-    prepared_results = Parallel(
+    print("Calculating", len(labels), "residuals")
+    
+    prepared: dict[int, np.ndarray] = {tsid:values for tsid, values in Parallel(
         n_jobs=jobs,
         backend="threading",
         prefer="threads",
@@ -163,13 +156,8 @@ def train(
         return_as="generator",
     )(
         delayed(to_traindata)(tsid)
-        for tsid in sequence_ids
-    )
-    
-    print("Calculating", total_sequences, "residuals")
-    
-    
-    prepared: dict[int, np.ndarray] = {tsid:values for tsid, values in prepared_results} # type: ignore
+        for tsid in labels.index.to_numpy(dtype=int)
+    )} # type: ignore
 
     def sequence_ids_for(dataset_id: int) -> np.ndarray:
         return labels.index[labels["dataset_ID"] == dataset_id].to_numpy(dtype=int)
@@ -191,35 +179,65 @@ def train(
     validation_target = labelled_class_seq(2)
     test_target = labelled_class_seq(3)
     
-    print("Compiling model...")
+    print("Loading or compiling model...")
     
-    model = Sequential([
-        Input(shape=(ts_len, 1)),
-        Conv1D(
-            filters=filters, 
-            kernel_size=kernel_size,
-            padding="same",
-            activation="relu",
-            kernel_initializer=kernel_initializer,
-        ),
-        Dropout(0.1),
-        MaxPooling1D(pool_size = 2),
-        LSTM(50, return_sequences=True, kernel_initializer = kernel_initializer),
-        Dropout(0.1),
-        LSTM(10, kernel_initializer = kernel_initializer),
-        Dropout(0.1),
-        Dense(4, activation='softmax', kernel_initializer = kernel_initializer)
-    ])
+    kernel_initializer: str = 'lecun_normal'
+    
+    def compile_model(model: Sequential):
+        model.compile(
+            loss=SparseCategoricalCrossentropy(),
+            optimizer=Adam(learning_rate = 0.0005),
+            metrics=['accuracy', 'sparse_categorical_accuracy']
+        )
 
-    model.compile(
-        loss=SparseCategoricalCrossentropy(), 
-        optimizer=optimizer, 
-        metrics=['accuracy', 'sparse_categorical_accuracy']
-    )
+    checkpoint_initial_value: float | None = None
+    if os.path.exists(model_path):
+        print(f"Loading existing model checkpoint from {model_path}...")
+        model: Sequential = load_model(model_path) # type: ignore[assignment]
+
+        input_shape = getattr(model, "input_shape", None)
+        if input_shape is not None and tuple(input_shape[1:]) != (ts_len, 1):
+            raise ValueError(
+                f"Existing model at {model_path} expects input shape {input_shape[1:]}, "
+                f"but training data has shape {(ts_len, 1)}"
+            )
+
+        if getattr(model, "optimizer", None) is None:
+            print("Loaded model is not compiled; compiling before continuing training...")
+            compile_model(model)
+
+        validation_metrics = model.evaluate(
+            validation,
+            validation_target,
+            batch_size=batch_size,
+            verbose=0,
+            return_dict=True,
+        )
+        checkpoint_initial_value = validation_metrics.get("accuracy")
+        if checkpoint_initial_value is not None:
+            print(f"Existing model validation accuracy: {checkpoint_initial_value}")
+    else:
+        print("No existing model checkpoint found; creating a new model...")
+        model = Sequential([
+            Input(shape=(ts_len, 1)),
+            Conv1D(
+                filters=50,
+                kernel_size=12,
+                padding="same",
+                activation="relu",
+                kernel_initializer=kernel_initializer,
+            ),
+            Dropout(0.1),
+            MaxPooling1D(pool_size = 2),
+            LSTM(50, return_sequences=True, kernel_initializer = kernel_initializer),
+            Dropout(0.1),
+            LSTM(10, kernel_initializer = kernel_initializer),
+            Dropout(0.1),
+            Dense(4, activation='softmax', kernel_initializer = kernel_initializer)
+        ])
+        compile_model(model)
     
     print("Fitting model...")
-    
-    MONITOR: Final[str] = "val_accuracy"
     
     history = model.fit(
         x=train,
@@ -227,7 +245,14 @@ def train(
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[
-            ModelCheckpoint(model_path, monitor=MONITOR, save_best_only=True, mode="max", verbose=1 if verbose else 0),
+            ModelCheckpoint(
+                model_path,
+                monitor="val_accuracy",
+                save_best_only=True,
+                mode="max",
+                verbose=1 if verbose else 0,
+                initial_value_threshold=checkpoint_initial_value,
+            ),
         ],
         validation_data=(validation, validation_target),
         verbose="auto" if verbose else 0, # type: ignore
@@ -244,14 +269,16 @@ def train(
     test_preds = model.predict(test, batch_size=256).argmax(axis=-1)
     accuracy = accuracy_score(test_target, test_preds)
     
+    
+    # Kernel size: {model.layers[1].kernel_size}
+    # Filters: {filters}
+    # learning_rate: {optimizer.learning_rate}
+    # kernel_initializer: {kernel_initializer}
+    
     summary = f"""Simulation:
         Time Series Length: {ts_len}
         Epochs: {epochs}
-        Kernel size: {kernel_size}
-        Filters: {filters}
         Batch size: {batch_size}
-        learning_rate: {optimizer.learning_rate}
-        kernel_initializer: {kernel_initializer}
         pad_left: {pad_left}
         pad_right: {pad_right}
         
@@ -328,7 +355,7 @@ if __name__ == "__main__":
         train_args = tuple(args.train)
         if len(train_args) not in [2, 3]:
             raise ValueError("Please provide the time series length (ex. 1500) AND the number of batches (ex. 10) OR an inclusive range of batches (ex. 1 10) and with --train! (ex. --train 1500 1 10 OR --train 1500 10)")
-        import models.lstm.generate as generate
+        import src.lstm.generate as generate
         data = generate.run_with_args(
             ts_len=train_args[0], 
             batches=list(range(train_args[1] if len(train_args) == 3 else 1, train_args[-1] + 1)),

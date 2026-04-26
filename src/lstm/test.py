@@ -1,8 +1,7 @@
 import abc
-import functools
 import itertools
 import traceback
-from typing import Any, Callable, Final, Iterable, Literal, Self, Sequence, Tuple
+from typing import Callable, Final, Iterable, Literal, Self, Sequence, Tuple
 from joblib import Parallel, delayed
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
@@ -12,15 +11,12 @@ from sklearn import metrics
 import matplotlib.pyplot as plt
 import os.path
 
-import models.lstm as lstm_module
-import models.metrics as metrics_module
-from models import Dataset, compute_residuals, iter_progress, space_indices
-from models.metrics import Metrics
-from models.lstm import LSTMLoader, LSTM, StochSim, Array, DeFunc
+from .. import Dataset, compute_residuals, iter_progress, space_indices
+from ..metrics import Metrics
+from . import LSTMLoader, LSTM, StochSim, Array, DeFunc
 
 type ModelData = tuple[pd.Series, pd.Series, float]
     
-
 class TestModel(metaclass = abc.ABCMeta):
         
     INDICES: Final[list[str]] = ["forced", "tsid", "time"]
@@ -483,19 +479,19 @@ def test_models(lengths: set[int]) -> list[TestModel]:
 def get_metrics(model: TestModel, lstm: LSTM | None = None, path: str | None = None, verbose: bool = True) -> dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
     
     parallel = Parallel(return_as="generator_unordered", backend="threading", n_jobs=4)
-    cache_sources = [__file__, metrics_module.__file__, lstm_module.__file__]
     
-    MODIFIED_TIME = max(
-        os.path.getmtime(source)
-        for source in cache_sources
-        if source is not None and os.path.exists(source)
-    )
+    # MODIFIED_TIME = max(
+    #     os.path.getmtime(source)
+    #     for source in [__file__, metrics_module.__file__, lstm_module.__file__]
+    #     if source is not None and os.path.exists(source)
+    # )
+    
+    COLUMNS = ["ktau_variance", "ktau_ac1"] + (LSTM.COLUMNS if lstm is not None else [])
     
     def per_sim(kind: str, forced: np.bool, tsid, df: pd.DataFrame) -> pd.DataFrame:
         assert pd.api.types.is_integer(tsid)
 
         FILE = f"metrics_{"forced" if forced else "null"}_{kind}_{tsid}.csv"
-        COLUMNS = ["ktau_variance", "ktau_ac1"] + (LSTM.COLUMNS if lstm is not None else [])
         df = df.reset_index(TestModel.INDICES[:-1], drop=True).sort_index()
 
         indices = space_indices(df["residuals"], spacing=10)

@@ -22,13 +22,13 @@ The python script at `training/generate.py` is runnable and takes in a path argu
 
 The script can resume previous generation if it is stopped during a run.
 
-The commands for generation used to match the Bury training-set sizes are `python -m models.lstm.generate env/training/len500 -b 125 -l 500` and `python -m models.lstm.generate env/training/len1500 -b 50 -l 1500`, giving 500,000 and 200,000 time series respectively.
+The commands for generation used to match the Bury training-set sizes are `python -m src.lstm.generate env/training/len500 -b 125 -l 500` and `python -m src.lstm.generate env/training/len1500 -b 50 -l 1500`, giving 500,000 and 200,000 time series respectively.
 
 #### Training the models
 
 The python script at `models/lstm/train.py` can be run in order to train models. It takes in a path argument defining the directory of the training data generated from previous runs of the generator script. This input directory can read recursively for multiple runs of data, such as over multiple time-series lengths. It also takes in another path argument defining the output directory to place the completed deep learning models in.
 
-The command for training the models used to achieve the results shown in the project are `python -m models.lstm.train env/training/len$TS_LEN/ -o models/lstm/len$TS_LEN/ -n best_model_$N --jobs $SLURM_CPUS_PER_TASK` where TS_LEN is the time series length from the generated data and N is the nth model trained.
+The command for training the models used to achieve the results shown in the project are `python -m src.lstm.train env/training/len$TS_LEN/ -o models/lstm/len$TS_LEN/ -n best_model_$N --jobs $SLURM_CPUS_PER_TASK` where TS_LEN is the time series length from the generated data and N is the nth model trained.
 
 #### Testing and running the models
 

@@ -1,19 +1,20 @@
 if __name__ == "__main__":
     print("Importing environment...")
     import os
-    from models.lstm import LSTMLoader
-    from models.datasets import *
-
-    import models.lstm.test as test
+    from .lstm import LSTMLoader, test
+    from . import get_project_path
     
     # Run LSTM model on new datasets and generate figures
     
-    lstm = LSTMLoader(get_project_path("bury_models/"))
+    lstm = LSTMLoader(get_project_path("output/models/lstm/"))
     
     PLOT_OUTPUT = get_project_path("output/plots")
     
+    print("Loading datasets...")
+    from .datasets import *
+    
     # lstm.with_args(verbose=True, window=35).run_with_output([Lisiecki], PLOT_OUTPUT, title=False)
-    lstm.with_args(window=120).run_with_output([BuryEndYoungerDryas2], PLOT_OUTPUT, title=False)
+    lstm.with_args(window=200).run_with_output([BuryEndYoungerDryas2], PLOT_OUTPUT, title=False)
     
     print("Generating project figures from data...")
     test.load_and_save(

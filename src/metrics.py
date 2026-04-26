@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import scipy.stats
 from scipy.stats._axis_nan_policy import SmallSampleWarning
-from models import Dataset, Model, compute_residuals, space_indices
+from . import Dataset, Model, compute_residuals, space_indices
 import warnings
         
 class Metrics(Model[pd.DataFrame]):

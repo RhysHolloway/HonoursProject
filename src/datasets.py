@@ -1,16 +1,7 @@
-from models.lstm.test import DatasetModel
-from models import Column, Dataset
-import os.path
+from .lstm.test import DatasetModel
+from . import Column, Dataset, get_project_path
 
 import pandas as pd
-
-# Get root project path
-def get_project_path(path: str):
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), path).replace("\\", "/")
-    dir = os.path.dirname(path)
-    if not os.path.exists(dir):
-            os.makedirs(dir)
-    return path
 
 def data_path(file: str) -> str:
     return get_project_path(f"data/{file}")
