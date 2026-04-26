@@ -1,6 +1,6 @@
 # Sudden transitions in Earth's history
 
-This repository contains code to reproduce data and results in Rhys Holloway's honours project.
+This repository contains code to reproduce data and results in Rhys Holloway's Honours project.
 
 ## Setup
 
@@ -12,7 +12,7 @@ During the first run the script creates a virtual Python environment and downloa
 
 ### Identifying tipping points through classification of bifurcations in a time-series by a deep learning model.
 
-There exists a Bash script `generate_lstm_models.sh` that automatically runs all of the commands below. If being run with SLURM, use the flags `--cpus-per-task` with a minimum value of 11, `--overcommit`, and `--hint=multithread`, and provide access to a GPU with `--gpus 1`.
+There exists a Bash script `generate_lstm_models.sh` that automatically runs all of the commands below. If being run on the compute nodes `gpu-l#-n#` with SLURM, use the flags `--cpus-per-task` with a minimum value of 11, `--overcommit`, and `--hint=multithread`, and provide access to a GPU with `--gpus 1`.
 
 #### Generation of the training set
 
@@ -28,16 +28,10 @@ The commands for generation used to match the Bury training-set sizes are `pytho
 
 The python script at `models/lstm/train.py` can be run in order to train models. It takes in a path argument defining the directory of the training data generated from previous runs of the generator script. This input directory can read recursively for multiple runs of data, such as over multiple time-series lengths. It also takes in another path argument defining the output directory to place the completed deep learning models in.
 
-The command for training the models used to achieve the results shown in the project are `python -m src.lstm.train env/training/len$TS_LEN/ -o models/lstm/len$TS_LEN/ -n best_model_$N --jobs $SLURM_CPUS_PER_TASK` where TS_LEN is the time series length from the generated data and N is the nth model trained.
+The command for training the models used to achieve the results shown in the project are `python -m src.lstm.train env/training/len$TS_LEN/ -o models/lstm/len$TS_LEN/ -n best_model_$N --jobs $SLURM_CPUS_PER_TASK` where `TS_LEN` is the time series length from the generated data and `N` is the nth model trained.
 
 #### Testing and running the models
 
-The `LSTM` class can be used to run models on datasets. It requires a Keras model picking function to be passed in as well, which is provided in the form of the `LSTMModels` class which reads models from the folder structure generated using the above training instructions.
+The `LSTM` class can be used to run models on datasets. It requires a Keras model picking function to be passed in as well, which is provided in the form of the `LSTMModels` class which reads models from the folder structure generated using the above training instructions. The original models are under `data/bury_models` and the models generated from this project are under `output/models/lstm`.
 
-The 
-
-The code in `src/main.py` was used to generate results shown in the project.
-
-### Metric-based analysis
-
-### DLM
+The code in `src/results.py` was used to generate results shown in the project, and can be run with `python -m src.results`.

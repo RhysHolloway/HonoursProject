@@ -23,17 +23,22 @@ def get_project_path(path: str):
             os.makedirs(dir)
     return path
 
-def index_values(index: pd.Index) -> np.ndarray:
+def time_index(index: pd.Index) -> pd.Index:
     if "time" in index.names:
-        return index.get_level_values("time").to_numpy(dtype=float, copy=False)
-    return index.to_numpy(dtype=float, copy=False)
+        return index.get_level_values("time")
+    elif len(index.names) > 1:
+        raise ValueError("Could not get time from indices:", index.names) 
+    else:
+        return index
 
-def compute_residuals(data: pd.Series, span: float = 0.2, type: DetrendMethod = "Lowess") -> pd.Series:
+def compute_residuals(data: pd.Series, span: float, method: DetrendMethod | None = None) -> pd.Series:
+    if method is None:
+        method = "Lowess"
     from scipy.ndimage import gaussian_filter
     from statsmodels.nonparametric.smoothers_lowess import lowess
     smoothing: np.ndarray
     state = data.to_numpy(dtype=float, copy=False)
-    match type:
+    match method:
         case "Gaussian":
             # Standard deviation of kernel given bandwidth
             # Note that for a Gaussian, quartiles are at +/- 0.675*sigma
@@ -41,15 +46,70 @@ def compute_residuals(data: pd.Series, span: float = 0.2, type: DetrendMethod = 
             smoothing = gaussian_filter(data, sigma=(0.25 / 0.675) * span, mode="reflect")
         case "Lowess":
             span = span if 0 < span <= 1 else span / len(data)
-            x = index_values(data.index)
-            smoothing = lowess(state, x, frac=span, is_sorted=_is_sorted(x), return_sorted=False)
+            smoothing = lowess(state, time_index(data.index).to_numpy(), is_sorted=True, return_sorted=False, frac=span)
         case _:
-            raise ValueError(f"Invalid detrending type: {type}")
+            raise ValueError(f"Invalid detrending type: {method}")
     return pd.Series(state - smoothing, index=data.index, name="residuals")
 
+def make_fast_lowess_residualizer(index: pd.Index, span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
+    from scipy import sparse
 
-def _is_sorted(values: np.ndarray) -> bool:
-    return len(values) < 2 or bool(np.all(values[:-1] <= values[1:]))
+    x = time_index(index).to_numpy(dtype=float)
+    n = len(x)
+    if n == 0:
+        return lambda data: np.empty(0, dtype=float)
+
+    frac = span if 0 < span <= 1 else span / n
+    window = min(n, max(2, int(np.ceil(frac * n))))
+
+    rows: list[int] = []
+    cols: list[int] = []
+    weights: list[float] = []
+
+    for row, x0 in enumerate(x):
+        distances = np.abs(x - x0)
+        neighbour_idx = np.argpartition(distances, window - 1)[:window]
+        h = distances[neighbour_idx].max()
+        if h == 0:
+            rows.append(row)
+            cols.append(row)
+            weights.append(1.0)
+            continue
+
+        xdiff = x[neighbour_idx] - x0
+        local_weights = (1 - (np.abs(xdiff) / h) ** 3) ** 3
+        valid = local_weights > 0
+        neighbour_idx = neighbour_idx[valid]
+        xdiff = xdiff[valid]
+        local_weights = local_weights[valid]
+
+        s0 = local_weights.sum()
+        s1 = np.dot(local_weights, xdiff)
+        s2 = np.dot(local_weights, xdiff * xdiff)
+        denom = s0 * s2 - s1 * s1
+
+        if denom == 0:
+            row_weights = local_weights / s0
+        else:
+            row_weights = local_weights * (s2 - s1 * xdiff) / denom
+
+        rows.extend([row] * len(neighbour_idx))
+        cols.extend(neighbour_idx.tolist())
+        weights.extend(row_weights.tolist())
+
+    smoother = sparse.csr_matrix((weights, (rows, cols)), shape=(n, n), dtype=float)
+
+    def residualize(data: pd.Series) -> np.ndarray:
+        state = data.to_numpy(dtype=float, copy=False)
+        if len(state) != n:
+            raise ValueError(f"FastLowess residualizer expected length {n}, got {len(state)}")
+        if not np.isfinite(state).all():
+            return compute_residuals(data, span=span, method="Lowess").to_numpy(dtype=float, copy=True)
+        return state - smoother.dot(state)
+
+    return residualize
+
+
 
 def space_indices(series: pd.Series, spacing: int) -> list[int]:
     first = series.first_valid_index()
@@ -217,10 +277,10 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
         pass
     
     @abc.abstractmethod 
-    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
+    def _plot(self: Self, dataset: Dataset, title: bool = True, transitions: Iterable[int | float] = []) -> Figure:
         pass
     
-    def run_with_output(self, datasets: Iterable[Dataset], path: str, title: bool = True):
+    def run_with_output(self, datasets: Iterable[Dataset], path: str, title: bool = True, transitions: Iterable[int | float] = []):
         from builtins import print as println
         
         println(f"###### Running {self.name} on datasets:")
@@ -233,7 +293,7 @@ class Model(Generic[RESULTS], metaclass = abc.ABCMeta):
                 println()
                 
                 try:
-                    fig = self._plot(dataset, title)
+                    fig = self._plot(dataset, title, transitions)
                     import os.path
                     fig.savefig(os.path.join(path, f"{self.name} {dataset.name}.png"))
                     plt.close(fig)

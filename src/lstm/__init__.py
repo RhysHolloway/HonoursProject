@@ -4,7 +4,7 @@ from typing import Any, Final, Self, Sequence, Callable, Iterable, Literal, Tupl
 from joblib import Parallel, delayed
 import numpy as np
 import pandas as pd
-from .. import Column, Dataset, Model, compute_residuals, iter_progress, space_indices
+from .. import Column, Dataset, Model, DetrendMethod, compute_residuals, iter_progress, space_indices, time_index
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
@@ -91,8 +91,8 @@ class LSTM(Model[pd.DataFrame]):
         get_models: Callable[[int], Sequence[KerasModel]],
         name: str = "LSTM",
         spacing: int = 10,
-        window: float | int = 0.25,
-        detrend: str = "Lowess",
+        span: float | int = 0.2,
+        detrend: DetrendMethod | None = None,
         verbose: bool = True,
         jobs: int = 4,
     ):
@@ -101,11 +101,11 @@ class LSTM(Model[pd.DataFrame]):
         self.get_models = get_models
         self.verbose = verbose
         self.spacing = spacing
-        self.window = window
+        self.span = span
         self.jobs = jobs
         self.result_means: dict[Dataset, pd.DataFrame] = dict()
         self.result_peaks: dict[Dataset, LSTMPeaks] = dict()
-        self.detrend = detrend
+        self.detrend: DetrendMethod | None = detrend
     
     def run_on_series(
         self: Self,
@@ -185,30 +185,6 @@ class LSTM(Model[pd.DataFrame]):
     @staticmethod
     def calc_means(predictions: pd.DataFrame) -> pd.DataFrame:
         return predictions[__class__.COLUMNS].dropna().groupby("time").mean()
-    
-    # @staticmethod
-    # def calc_peaks(
-    #     predictions: pd.DataFrame, 
-    #     means: pd.DataFrame | None = None, 
-    #     prominence: float = 0.05,
-    #     distance: int = 10,
-    # ) -> LSTMPeaks:
-        
-    #     def subset(df: pd.DataFrame) -> dict[Any, np.ndarray]:
-    #         from scipy.signal import find_peaks
-    #         return {
-    #             name:find_peaks(
-    #                 x=col.index.get_level_values("time"),
-    #                 height=col.to_numpy(),
-    #                 prominence=prominence,
-    #                 distance=distance
-    #             )[0] for name, col in df[__class__.COLUMNS[:-1]].items()
-    #         }
-        
-    #     peaks: dict[Any, Any] = {feature:subset(df) for feature, df in (predictions.groupby("variable") if "variable" in predictions.index.names else [(None, predictions)])} 
-    #     if means is not None:
-    #         peaks[None] = subset(means)
-    #     return peaks
 
     def means(
         self: Self,
@@ -234,60 +210,56 @@ class LSTM(Model[pd.DataFrame]):
     def run(
         self: Self,
         dataset: Dataset,
-        window: float | int | None = None,
-        detrend: str | None = None,
+        span: float | int | None = None,
+        detrend: DetrendMethod | None = None,
     ):
         def compute(feature: Column) -> pd.DataFrame:
-            residuals = compute_residuals(dataset.df[feature],span=window or self.window, type=detrend or self.detrend)[::-1] # type: ignore
+            residuals = compute_residuals(dataset.df[feature],span=span or self.span, method=detrend or self.detrend)[::-1] # type: ignore
             df = self.run_on_series(residuals)
             return df.set_index(pd.Series([feature] * len(df), name="variable"), append=True)
         
         self.results[dataset] = pd.concat(map(compute, dataset.df.columns))
-
-    @staticmethod
-    def _plot_prob(ax: Axes, feature: Any, col: str, df: pd.DataFrame, label: str | None = None):
-        data = df[col]
-        ax.plot(data.index.get_level_values("time"), data.to_numpy(), label=label)
         
     @staticmethod                
-    def plot(axes: Sequence[Axes], means: pd.DataFrame, reverse: bool = True):
+    def plot(axes: Sequence[Axes], means: pd.DataFrame, transitions: Iterable[int | float] = []):
         
         last_ax = axes[-1]
         means_ax = axes[-2]
         
         last_ax.set_xlabel("Age (ya BP)")
         
-        last_ax.set_ylim(0, 1)
-        means_ax.set_ylim(0, 1)
+        time = np.abs(time_index(means.index))
         
-        last_ax.set_ylabel("Probability")
-        means_ax.set_ylabel("Probability")
+        for ax in [means_ax, last_ax]:        
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Probability")
+            ax.xaxis.set_inverted(True)
+            for transition in transitions:
+                transition = np.abs(transition)
+                if time.min() <= transition <= time.max():
+                    ax.axvline(transition, linestyle='dashed')
 
-        if reverse:
-            last_ax.xaxis.set_inverted(True)
-            means_ax.xaxis.set_inverted(True)
-        
         means_ax.set_title("Bifurcation Probabilities")
         for col in __class__.COLUMNS[:-1]:
-            __class__._plot_prob(means_ax, None, col, means, col)
+            means_ax.plot(time, means[col].to_numpy(), label=col)
         means_ax.legend(
             loc="center left",
             bbox_to_anchor=(1, 0.5)
         )
         
-        bif_probs = means[__class__.COLUMNS[:-1]].set_index(means.index.get_level_values("time")).sum(axis=1)
+        bif_probs = means[__class__.COLUMNS[:-1]].sum(axis=1)
         last_ax.set_title("Probability of Any Bifurcation")
-        last_ax.plot(bif_probs, label="Bifurcation")
+        last_ax.plot(time, bif_probs, label="Bifurcation")
         null = means[__class__.COLUMNS[-1]]
-        null.index = null.index.get_level_values("time")
-        last_ax.plot(null, label=null.name)
+        last_ax.plot(time, null, label=null.name)
         last_ax.legend(
             loc="center left",
             bbox_to_anchor=(1, 0.5)
         )
+        
 
 
-    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
+    def _plot(self: Self, dataset: Dataset, title: bool = True, transitions: Iterable[int | float] = []) -> Figure:
         
         preds = self.results[dataset]
         
@@ -304,6 +276,7 @@ class LSTM(Model[pd.DataFrame]):
         __class__.plot(
             axes=axes[0:2],
             means=self.means(dataset), 
+            transitions=transitions,
             # peaks = self.peaks(dataset)
         )
         
@@ -314,8 +287,8 @@ class LSTM(Model[pd.DataFrame]):
                 ax.set_title(f"{col} Probability")
                 ax.set_xlabel("Age (ya BP)")
                 ax.set_ylabel("Probability")
-                for feature, data in preds.groupby("variable"): # type: ignore
-                    __class__._plot_prob(ax, feature, col, data, str(feature))
+                for feature, data in preds.groupby("variable"): # type: ignore 
+                    ax.plot(np.abs(time_index(data.index)), data[col].to_numpy(), label=str(feature))
                 ax.legend()
         
         if title:

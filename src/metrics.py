@@ -1,5 +1,5 @@
 import functools
-from typing import Literal, Self, Sequence
+from typing import Iterable, Literal, Self, Sequence
 from matplotlib import pyplot
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
@@ -7,25 +7,25 @@ import numpy as np
 import pandas as pd
 import scipy.stats
 from scipy.stats._axis_nan_policy import SmallSampleWarning
-from . import Dataset, Model, compute_residuals, space_indices
+from . import Dataset, DetrendMethod, Model, compute_residuals, space_indices, time_index 
 import warnings
         
 class Metrics(Model[pd.DataFrame]):
     
     def __init__(
-        self, 
-        window: float,
-        detrend_method: Literal["Gaussian", "Lowess"] = "Lowess",
-        ktau_distance: int | None = None,
-        transition = None,
+        self: Self, 
+        span: float | int | None = None,
+        window: float | int | None = None,
+        detrend: DetrendMethod | None = None,
+        ktau_sampling: int | Sequence[int] | None = None,
     ):
         super().__init__("Metric-based analysis")
-        assert 0.0 < window < 1.0
+        assert span is None or 0.0 < span
         
+        self.span = span
         self.window = window
-        self.detrend_method = detrend_method
-        self.ktau_distance = ktau_distance
-        self.transition = transition
+        self.detrend: DetrendMethod | None = detrend
+        self.ktau_sampling = ktau_sampling
 
     # Compute kendall tau values at equally spaced time points
     @staticmethod
@@ -62,62 +62,62 @@ class Metrics(Model[pd.DataFrame]):
     def ac1(rolling: pd.api.typing.Rolling) -> pd.Series:
         return pd.Series(rolling.apply(func=lambda x: pd.Series(x).autocorr(lag=1), raw=True), name = "ac1")
     
-    def run_on_series(self: Self, series: pd.Series, transition: int | None = None, ktau_distance: int | None = None, window: float | None = None) -> pd.DataFrame:
+    def run_on_series(self: Self, series: pd.Series, span: int | float | None = None, window: float | int | None = None, detrend: DetrendMethod | None = None, ktau_sampling: int | Sequence[int] | None = None) -> pd.DataFrame:
         
-        series = series.copy(deep=False)
-        series.index = series.index.get_level_values("time")
+        series = pd.Series(series.values, index=time_index(series.index))
         
-        if transition is not None:
-            series = series[series.index <= transition]
-        
-        if window is None:
-            window = self.window
-        window = self.window_index(series, window)
+        window = self.window_index(series, window or self.window or 0.25)
             
-        residuals = compute_residuals(series, type=self.detrend_method) # type: ignore
+        residuals = compute_residuals(series, span=span or self.span or 0.2, method=detrend or self.detrend)
         rolling = residuals.rolling(window=window)
         variance = self.variance(rolling)
         ac1 = self.ac1(rolling)
     
         df = series.to_frame(name="value").join([residuals, variance, ac1])
         
-        if ktau_distance is None:
-            ktau_distance = self.ktau_distance
-        
-        if ktau_distance:
+        ktau_sampling = ktau_sampling or self.ktau_sampling
+        if ktau_sampling is not None:
             for col in ["variance", "ac1"]:
                 series = df[col]
-                spacing = space_indices(series, ktau_distance)
+                spacing = space_indices(series, ktau_sampling) if isinstance(ktau_sampling, int) else ktau_sampling
                 df["ktau_" + col] = self.ktau(series, indices=spacing)
+                
+        df =  df.reset_index("time").set_index("time")    
+        
+        print(df)         
             
-        # df.insert(0, "variable", [series.name] * len(df))
-
         return df
     
     def run(
         self: Self,
         dataset: Dataset,
     ):
-        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.feature_cols.keys())) # type: ignore               
+        self.results[dataset] = pd.concat((self.run_on_series(dataset.df[column]).reset_index() for column in dataset.df.columns)) # type: ignore               
     
-    def _plot(self: Self, dataset: Dataset, title: bool = True) -> Figure:
+    def _plot(self: Self, dataset: Dataset, title: bool = True, transitions: Iterable[int | float] = []) -> Figure:
         ROWS = 2
         fig, axes = pyplot.subplots(nrows=ROWS, sharex = True)
-        __class__.plot(axes, self.results[dataset])
+        __class__.plot(axes, self.results[dataset], transitions=transitions)
         if title:
             fig.suptitle("Metrics of " + dataset.name)
         fig.tight_layout()
         return fig
     
     @staticmethod
-    def plot(axs: Sequence[Axes], df: pd.DataFrame):
-        time = df.index.get_level_values("time")
+    def plot(axs: Sequence[Axes], df: pd.DataFrame, transitions: Iterable[int | float] = []):
+        
+        time = np.abs(time_index(df.index))
+        
         axs[-1].set_xlabel(f"Age (ya BP)")
 
-        def plot(data: pd.Series, title: str, i: int):
-            axs[i].set_ylabel(title)
-            axs[i].invert_xaxis()
-            axs[i].plot(time, data.to_numpy(), label=title)
+        def plot(ax: Axes, data: pd.Series, title: str):
+            ax.set_ylabel(title)
+            ax.xaxis.set_inverted(True)
+            ax.plot(time, data.to_numpy(), label=title)
+            for transition in transitions:
+                transition = np.abs(transition)
+                if time.min() <= transition <= time.max():
+                    ax.axvline(transition, linestyle='dashed')
                     
-        plot(df["variance"], "Variance", 0)
-        plot(df["ac1"], "AC-1", 1)
+        plot(axs[0], df["variance"], "Variance")
+        plot(axs[1], df["ac1"], "AC-1")

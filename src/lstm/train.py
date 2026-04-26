@@ -12,82 +12,24 @@ Modified model training script for the tipping point-detecting deep learning mod
 import os
 import os.path
 import random
-from typing import Callable, Final, Literal
+from typing import Any, Callable, Final, Literal
 import numpy as np
 import pandas as pd
 
 from joblib import Parallel, delayed
 
-from .. import compute_residuals, index_values
+from .. import time_index, make_fast_lowess_residualizer
 from . import INDEX_COL, TrainData, combine_batches
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-from keras.models import load_model, Sequential  # type: ignore
-from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input  # type: ignore
-from keras.optimizers import Optimizer, Adam
-from keras.callbacks import ModelCheckpoint  # type: ignore
+from keras.models import load_model, Sequential
+from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input
+from keras.optimizers import Adam
+from keras.callbacks import ModelCheckpoint
 from keras.losses import SparseCategoricalCrossentropy
 
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score, classification_report
-
-def _make_fast_lowess_residualizer(index: pd.Index, span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
-    from scipy import sparse
-
-    x = index_values(index)
-    n = len(x)
-    if n == 0:
-        return lambda data: np.empty(0, dtype=float)
-
-    frac = span if 0 < span <= 1 else span / n
-    window = min(n, max(2, int(np.ceil(frac * n))))
-
-    rows: list[int] = []
-    cols: list[int] = []
-    weights: list[float] = []
-
-    for row, x0 in enumerate(x):
-        distances = np.abs(x - x0)
-        neighbour_idx = np.argpartition(distances, window - 1)[:window]
-        h = distances[neighbour_idx].max()
-        if h == 0:
-            rows.append(row)
-            cols.append(row)
-            weights.append(1.0)
-            continue
-
-        xdiff = x[neighbour_idx] - x0
-        local_weights = (1 - (np.abs(xdiff) / h) ** 3) ** 3
-        valid = local_weights > 0
-        neighbour_idx = neighbour_idx[valid]
-        xdiff = xdiff[valid]
-        local_weights = local_weights[valid]
-
-        s0 = local_weights.sum()
-        s1 = np.dot(local_weights, xdiff)
-        s2 = np.dot(local_weights, xdiff * xdiff)
-        denom = s0 * s2 - s1 * s1
-
-        if denom == 0:
-            row_weights = local_weights / s0
-        else:
-            row_weights = local_weights * (s2 - s1 * xdiff) / denom
-
-        rows.extend([row] * len(neighbour_idx))
-        cols.extend(neighbour_idx.tolist())
-        weights.extend(row_weights.tolist())
-
-    smoother = sparse.csr_matrix((weights, (rows, cols)), shape=(n, n), dtype=float)
-
-    def residualize(data: pd.Series) -> np.ndarray:
-        state = data.to_numpy(dtype=float, copy=False)
-        if len(state) != n:
-            raise ValueError(f"FastLowess residualizer expected length {n}, got {len(state)}")
-        if not np.isfinite(state).all():
-            return compute_residuals(data, span=span, type="Lowess").to_numpy(dtype=float, copy=True)
-        return state - smoother.dot(state)
-
-    return residualize
 
 
 _DEFAULT_EPOCHS = 1500
@@ -126,7 +68,7 @@ def train(
     
     print("Computing training data from simulations...")
 
-    residualize = _make_fast_lowess_residualizer(next(iter(sims.values())).index)
+    residualize = make_fast_lowess_residualizer(next(iter(sims.values())).index)
     
     def to_traindata(tsid: int) -> tuple[int, np.ndarray]:
         values = np.array(residualize(sims[tsid]), dtype=float, copy=True)
@@ -148,7 +90,7 @@ def train(
 
     print("Calculating", len(labels), "residuals")
     
-    prepared: dict[int, np.ndarray] = {tsid:values for tsid, values in Parallel(
+    prepared: dict[int, np.ndarray] = dict(Parallel(
         n_jobs=jobs,
         backend="threading",
         prefer="threads",
@@ -157,7 +99,7 @@ def train(
     )(
         delayed(to_traindata)(tsid)
         for tsid in labels.index.to_numpy(dtype=int)
-    )} # type: ignore
+    )) # type: ignore
 
     def sequence_ids_for(dataset_id: int) -> np.ndarray:
         return labels.index[labels["dataset_ID"] == dataset_id].to_numpy(dtype=int)
@@ -210,7 +152,7 @@ def train(
             validation,
             validation_target,
             batch_size=batch_size,
-            verbose=0,
+            verbose=0, # type: ignore
             return_dict=True,
         )
         checkpoint_initial_value = validation_metrics.get("accuracy")
@@ -321,7 +263,7 @@ if __name__ == "__main__":
         def read_sim(seq_id: int) -> tuple[int, pd.Series]:
             return seq_id, pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['p0']
 
-        sims = dict(Parallel(
+        sims: Any = dict(Parallel(
             n_jobs=jobs,
             backend="threading",
             prefer="threads",
@@ -371,7 +313,7 @@ if __name__ == "__main__":
                 batch_dirs = sorted(entry for entry in entries if os.path.exists(os.path.join(input, entry, "groups.csv")))
                 if len(batch_dirs) == 0:
                     raise RuntimeError(f"Input folder {input} contains no batches in entries: {entries}")
-                batches = Parallel(
+                batches: Any = Parallel(
                     n_jobs=args.jobs,
                     backend="threading",
                     prefer="threads",

@@ -273,7 +273,7 @@ def _gen_model(
         n_jobs=max(1, int(param_jobs)),
         backend="threading",
         return_as="generator_unordered",
-        pre_dispatch=max(1, int(param_jobs)),
+        pre_dispatch=str(max(1, int(param_jobs))),
     )(delayed(safe_simulate)(int(par)) for par in nonzero_parameters)
 
     for r in results:
@@ -479,11 +479,9 @@ def _simulate(
                 
                 if transit_pos + 1 >= ts_len:
                     start = transit_pos + 1 - ts_len
-                    sim = sim.iloc[start:transit_pos + 1].copy()
-                    sim.index = pd.Index(np.arange(len(sim)), name="time")
                     sims.append((
                         # Simulations
-                        sim,
+                        pd.Series(sim.iloc[start:transit_pos + 1], index=pd.Index(np.arange(ts_len), name="time")),
                         # Label
                         bif_type,
                     ))
@@ -668,7 +666,7 @@ def multibatch(
                 param_jobs=param_jobs,
             )
             for batch_num in batches
-        ))
+        )) # type: ignore
     else:
         return batch(
             batch_num=batches[0],

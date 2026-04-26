@@ -1,7 +1,7 @@
 import abc
 import itertools
 import traceback
-from typing import Callable, Final, Iterable, Literal, Self, Sequence, Tuple
+from typing import Any, Callable, Final, Iterable, Literal, Self, Sequence, Tuple
 from joblib import Parallel, delayed
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
@@ -151,8 +151,16 @@ class SimModel(TestModel):
                         )), verbose, desc=self.name + " simulations"))
             
             self.save(path, __class__.FILE, df)
+            
+        def finalize(df: pd.DataFrame, length: int):
+            df = self.metrics(df.iloc[-length:])
+            multi = isinstance(df.index, pd.MultiIndex)
+            df = df.reset_index("time")
+            df["time"] -= max_length
+            df = df.set_index("time", append=multi)
+            return df
 
-        return {f"len{length}":pd.concat(self.metrics(df.iloc[-length:]) for _, df in df.groupby(__class__.INDICES[:-1])) for length in self.lengths} # type: ignore        
+        return {f"len{length}":pd.concat(finalize(df, length) for _, df in df.groupby(__class__.INDICES[:-1])) for length in self.lengths} # type: ignore        
     
     def _simulate_once(
         self: Self,
@@ -274,7 +282,7 @@ class DatasetModel(TestModel):
         dataset: Dataset,
         variable: str,
         tcrit: int | float,
-        bandwidth: int | float,
+        span: int | float,
         window: int | float = 0.25,
         detrend: str | None = None,
         sims: int = 10,
@@ -301,12 +309,12 @@ class DatasetModel(TestModel):
         interpolated[variable] = interpolated[variable].interpolate(method="index")
         self.series = interpolated.dropna(subset="keep")[variable]
         
-        self.bandwidth = float(bandwidth)
+        self.span = float(span)
         self.tcrit = tcrit
         self.detrend = detrend or "Lowess"
         
     def compute(self: Self, series: pd.Series) -> pd.DataFrame:
-        residuals = compute_residuals(series, span=self.bandwidth, type=self.detrend) # type: ignore
+        residuals = compute_residuals(series, span=self.span, method=self.detrend) # type: ignore
         return self.metrics(pd.concat([series.to_frame("state"), residuals], axis = 1))
     
     def simulate(self: Self, parallel: Parallel, verbose: bool, path: str | None = None) -> dict[str, pd.DataFrame]:
@@ -362,17 +370,16 @@ class DatasetModel(TestModel):
             self.add_indices(df, False, tsid)
             return df
 
+        iter: Any = parallel(
+            delayed(compute_null)(alpha, sigma, x0, tsid, time) 
+            for (alpha, sigma, x0, time), tsid in 
+            itertools.product(
+                [map_null(df)], 
+                range(self.sims)
+        ))
+
         # Generate N null simulations
-        df = pd.concat(
-            iter_progress(itertools.chain(
-                [df], 
-                parallel(
-                    delayed(compute_null)(alpha, sigma, x0, tsid, time) 
-                    for (alpha, sigma, x0, time), tsid in 
-                    itertools.product(
-                        [map_null(df)], 
-                        range(self.sims)
-                ))), verbose, self.name + " simulations"))
+        df = pd.concat(iter_progress(itertools.chain([df], iter), verbose, self.name + " simulations"))
         
         self.save(path, FILE, df)
         
@@ -607,27 +614,31 @@ def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.Da
     forced_fig, forced_axes = get_plots()
     null_fig, null_axes = get_plots()
     
+    forced_axes[0].invert_xaxis()
+    null_axes[0].invert_xaxis()
+    
     for forced, df in sims.groupby("forced", dropna=False):
         
         axes = forced_axes if forced else null_axes
         
         means = df.groupby("time").mean()
-        means.index = means.index.get_level_values("time")
+        time = np.abs(means.index.get_level_values("time"))
         
-        axes[0].plot(means["state"], alpha = 0.7)
-        axes[0].plot(means["state"] - means["residuals"])
+        axes[0].plot(time, means["state"], alpha = 0.7)
+        axes[0].plot(time, means["state"] - means["residuals"])
         axes[0].set_ylabel("State")
-        Metrics.plot(axes[1:3], means)
+        Metrics.plot(axes[1:3], means, transitions=[time[-1]] if forced else [])
     
     if lstm is not None:
         for forced, df in metrics.groupby("forced", dropna=False):
             
             axes = forced_axes if forced else null_axes
             
+            means = lstm.calc_means(df)
             lstm.plot(
                 axes = axes[3:5],
-                means = lstm.calc_means(df),
-                reverse = False,
+                means = means,
+                transitions=[means.index.get_level_values("time")[-1]] if forced else [],
             )
             
     forced_fig.tight_layout()
