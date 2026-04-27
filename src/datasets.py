@@ -20,51 +20,6 @@ Lisiecki = Dataset.load(
     age_scale=1000,
 )
 
-Scotese = Dataset.load(
-    name="Scotese et al. (2021)",
-    df=lambda: pd.read_excel(data_path("Part 4. Phanerozoic_Paleotemperature_Summaryv4.xlsx"), sheet_name="Master", header=[0,1]),
-    age_col=("Age", 'Unnamed: 0_level_1'),
-    feature_cols={
-        ("Average", "Tropical"): "Tropical Temperature",
-        ("Average", "Deep Ocean"): "Deep Ocean Temperature", 
-        # ("Average", "∆T trop"),
-        ("North", "Polar >67˚N"): "North Polar Temperature", 
-        ("South", "Polar <67˚S"): "South Polar Temperature"
-    },
-    age_scale=1000000,
-)
-
-_GMST: dict[Column, str] = {
-    "GMST_05": "GMST 5%",
-    "GMST_16": "GMST 16%",
-    "GMST_50": "GMST 50%",
-    "GMST_84": "GMST 84%",
-    "GMST_95": "GMST 95%",
-}
-
-_CO2: dict[Column, str] = {
-    "CO2_05": "CO2 5%",
-    "CO2_16": "CO2 16%",
-    "CO2_50": "CO2 50%",
-    "CO2_84": "CO2 84%",
-    "CO2_95": "CO2 95%",
-}
-
-Judd = Dataset.load(
-    name="Judd et. al. (2024)",
-    df=lambda: pd.read_csv(data_path("PhanDA_GMSTandCO2_percentiles.csv")),
-    age_col="AverageAge",
-    feature_cols=_GMST | _CO2,
-    age_scale=1000000,    
-)
-
-_JuddSplit = Judd.split({
-    "GMST Confidence": list(_GMST.values()),
-    "CO2 Confidence": list(_CO2.values()),
-})
-
-JuddGMST, JuddCO2 = _JuddSplit["GMST Confidence"], _JuddSplit["CO2 Confidence"]
-
 BuryEndGreenhouseEarth = Dataset.load(
     name="Bury paleoclimate - End of greenhouse Earth",
     df=lambda: pd.read_csv(data_path("bury_paleoclimate/tripati2005/tripati2005_select.csv"), encoding="utf-8-sig"),
