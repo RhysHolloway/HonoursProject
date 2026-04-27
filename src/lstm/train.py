@@ -19,7 +19,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .. import time_index, make_fast_lowess_residualizer
-from . import INDEX_COL, TrainData, combine_batches
+from . import INDEX_COL, Groups, Labels, TrainData, combine_batches
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -34,8 +34,10 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precisio
 
 _DEFAULT_EPOCHS = 1500
 
+TestData = tuple[dict[int, np.ndarray], Labels, Groups]
+
 def train(
-    data: TrainData,
+    data: TestData,
     output: str,
     pad: Literal["lpad", "lrpad"],
     name: str = "best_model",
@@ -44,19 +46,8 @@ def train(
     jobs: int = -1,
     verbose: bool = True,
 ) -> Sequential:
-    sims, df_labels, df_groups = data
+    resids, df_labels, df_groups = data
     labels = pd.merge(df_groups, df_labels, left_index=True, right_index=True)
-    ts_len = len(next(iter(sims.values())))
-        
-    match pad:
-        case "lrpad":
-            pad_left = (ts_len // 2) - 25
-            pad_right = pad_left
-        case "lpad":
-            pad_left = ts_len - 50
-            pad_right = 0
-        case _:
-            raise ValueError("Please provide valid type as input: lrpad, lpad")
     
     os.makedirs(output, exist_ok=True)
 
@@ -68,38 +59,7 @@ def train(
     
     print("Computing training data from simulations...")
 
-    residualize = make_fast_lowess_residualizer(next(iter(sims.values())).index)
-    
-    def to_traindata(tsid: int) -> tuple[int, np.ndarray]:
-        values = np.array(residualize(sims[tsid]), dtype=float, copy=True)
-        
-        # Padding and normalizing input sequences
-        left_padding = int(pad_left * random.random())
-        right_padding = int(pad_right * random.random())
-        if left_padding > 0:
-            values[:left_padding] = 0
-        if right_padding > 0:
-            values[-right_padding:] = 0
-        
-        nonzero = values != 0
-        avg = np.mean(np.abs(values[nonzero])) if np.any(nonzero) else 1.0
-        if not np.isfinite(avg) or avg == 0:
-            avg = 1.0
-        
-        return tsid, (values / avg).astype(np.float32, copy=False)
-
     print("Calculating", len(labels), "residuals")
-    
-    prepared: dict[int, np.ndarray] = dict(Parallel(
-        n_jobs=jobs,
-        backend="threading",
-        prefer="threads",
-        require="sharedmem",
-        return_as="generator",
-    )(
-        delayed(to_traindata)(tsid)
-        for tsid in labels.index.to_numpy(dtype=int)
-    )) # type: ignore
 
     def sequence_ids_for(dataset_id: int) -> np.ndarray:
         return labels.index[labels["dataset_ID"] == dataset_id].to_numpy(dtype=int)
@@ -108,7 +68,7 @@ def train(
         ids = sequence_ids_for(dataset_id)
         if len(ids) == 0:
             return np.empty((0, ts_len, 1), dtype=np.float32)
-        return np.stack([prepared[tsid] for tsid in ids]).reshape(len(ids), ts_len, 1)
+        return np.stack([resids[tsid] for tsid in ids]).reshape(len(ids), ts_len, 1)
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
@@ -221,8 +181,6 @@ def train(
         Time Series Length: {ts_len}
         Epochs: {epochs}
         Batch size: {batch_size}
-        pad_left: {pad_left}
-        pad_right: {pad_right}
         
         accuracy: {accuracy}
         macro f1: {f1_score(test_target, test_preds, average="macro")}
@@ -249,33 +207,11 @@ def train(
     return model
 
 
+
 #############################################
 
 if __name__ == "__main__":
-    
-    def _read_batch(dir: str, jobs: int = 1) -> TrainData:
-        print(f"Reading {dir}...")
-        groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
         
-        if len(groups) == 0:
-            raise RuntimeError("Empty labels file!")
-
-        def read_sim(seq_id: int) -> tuple[int, pd.Series]:
-            return seq_id, pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0)['p0']
-
-        sims: Any = dict(Parallel(
-            n_jobs=jobs,
-            backend="threading",
-            prefer="threads",
-            require="sharedmem",
-        )(
-            delayed(read_sim)(int(seq_id))
-            for seq_id in groups.index.values
-        ))
-        labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL)
-        print("Read", dir)
-        return sims, labels, groups
-    
     import argparse
     parser = argparse.ArgumentParser(
                     prog='LSTM Model Trainer',
@@ -291,6 +227,67 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     output = args.input if args.output is None else args.output
+    
+    def _read_batch(dir: str, jobs: int = 1) -> TestData:
+        print(f"Reading {dir}...")
+        groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
+        
+        if len(groups) == 0:
+            raise RuntimeError("Empty labels file!")
+        
+        ts_len = len(pd.read_csv(os.path.join(dir, f"sims/tseries{next(groups.index[0])}.csv"), index_col=0)['p0'])
+        residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
+    
+        match args.pad:
+            case "lrpad":
+                pad_left = (ts_len // 2) - 25
+                pad_right = pad_left
+            case "lpad":
+                pad_left = ts_len - 50
+                pad_right = 0
+            case _:
+                raise ValueError("Please provide valid type as input: lrpad, lpad")
+
+        def to_traindata(sim: pd.Series) -> np.ndarray:
+            values = np.array(residualize(sim), dtype=float, copy=True)
+            del sim
+            
+            # Padding and normalizing input sequences
+            left_padding = int(pad_left * random.random())
+            right_padding = int(pad_right * random.random())
+            if left_padding > 0:
+                values[:left_padding] = 0
+            if right_padding > 0:
+                values[-right_padding:] = 0
+            
+            nonzero = len(values) != 0 and np.any(values != 0)
+            avg = np.mean(np.abs(values[nonzero])) if nonzero else 1.0
+            if not np.isfinite(avg) or avg == 0:
+                avg = 1.0
+            
+            return (values / avg).astype(np.float32, copy=False)
+            
+            
+
+        def read_resids(seq_id: int) -> tuple[int, np.ndarray]:
+            return seq_id, to_traindata(pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0, memory_map=True)['p0'])
+
+        iterator: Any = Parallel(
+            n_jobs=jobs,
+            backend="threading",
+            prefer="threads",
+            require="sharedmem",
+        )(
+            delayed(read_resids)(int(seq_id))
+            for seq_id in groups.index.values
+        )
+
+        resids: dict[int, np.ndarray[tuple[int], np.dtype[np.float64]]] = dict(iterator)
+        
+        labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL)
+        print("Read", dir)
+        return resids, labels, groups
+
     
     if args.train is not None:
         print("Reading/Generating training data in", args.input)

@@ -51,10 +51,10 @@ def compute_residuals(data: pd.Series, span: float, method: DetrendMethod | None
             raise ValueError(f"Invalid detrending type: {method}")
     return pd.Series(state - smoothing, index=data.index, name="residuals")
 
-def make_fast_lowess_residualizer(index: pd.Index, span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
+def make_fast_lowess_residualizer(index: Sequence[float | int] | np.ndarray[tuple[int], np.dtype[np.floating | np.int_]], span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
     from scipy import sparse
 
-    x = time_index(index).to_numpy(dtype=float)
+    x = np.array(index) # time_index(index).to_numpy(dtype=float)
     n = len(x)
     if n == 0:
         return lambda data: np.empty(0, dtype=float)
