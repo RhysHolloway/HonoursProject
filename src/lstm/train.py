@@ -97,7 +97,7 @@ def train(
 
     print("Calculating", len(labels), "residuals")
     
-    residerator: Any = Parallel(
+    prepared: dict[int, np.ndarray] = dict(Parallel(
         n_jobs=jobs,
         backend="threading",
         prefer="threads",
@@ -106,9 +106,7 @@ def train(
     )(
         delayed(to_traindata)(tsid)
         for tsid in labels.index.to_numpy(dtype=int)
-    )
-    
-    resids: dict[int, np.ndarray] = dict(residerator)
+    )) # type: ignore
 
     def sequence_ids_for(dataset_id: int) -> np.ndarray:
         return labels.index[labels["dataset_ID"] == dataset_id].to_numpy(dtype=int)
@@ -117,7 +115,7 @@ def train(
         ids = sequence_ids_for(dataset_id)
         if len(ids) == 0:
             return np.empty((0, ts_len, 1), dtype=np.float32)
-        return np.stack([resids[tsid] for tsid in ids]).reshape(len(ids), ts_len, 1)
+        return np.stack([prepared[tsid] for tsid in ids]).reshape(len(ids), ts_len, 1)
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
