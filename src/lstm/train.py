@@ -251,7 +251,7 @@ if __name__ == "__main__":
                 raise ValueError("Please provide valid type as input: lrpad, lpad")
 
         def to_traindata(sim: pd.Series) -> np.ndarray:
-            values = np.array(residualize(sim), dtype=float, copy=True)
+            values: np.ndarray[tuple[int], np.dtype[np.floating]] = np.array(residualize(sim), dtype=float, copy=True)
             del sim
             
             if len(values) == 0:
@@ -265,9 +265,9 @@ if __name__ == "__main__":
             if right_padding > 0:
                 values[-right_padding:] = 0
             
-            nonzero = values != 0.0
+            nonzero: np.ndarray[tuple[int], np.dtype[np.bool]] = values != 0.0
             nz_values = values[nonzero]
-            if not np.any(nonzero) or len(nz_values) == 0:
+            if not nonzero.any() or len(nz_values) == 0:
                 return values
             
             
