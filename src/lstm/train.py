@@ -270,8 +270,8 @@ if __name__ == "__main__":
             if not nonzero.any() or len(nz_values) == 0:
                 return values
             
-            
-            avg = np.mean(np.abs(nz_values)) if nonzero else 1.0
+
+            avg = np.mean(np.abs(nz_values))
             if not np.isfinite(avg) or avg == 0:
                 return values
             
