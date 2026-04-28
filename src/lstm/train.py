@@ -96,6 +96,9 @@ def train(
 
     print("Calculating", len(labels), "residuals")
     
+    def resid(tsid: int) -> np.ndarray:
+        return to_traindata(residualize(sims[tsid]))
+    
     residerator: Any = Parallel(
         n_jobs=jobs,
         backend="threading",
@@ -103,7 +106,7 @@ def train(
         require="sharedmem",
         return_as="generator",
     )(
-        delayed(lambda tsid: to_traindata(residualize(sims[tsid])))(tsid)
+        delayed(resid)(tsid)
         for tsid in labels.index.to_numpy(dtype=int)
     )
     
@@ -276,14 +279,17 @@ if __name__ == "__main__":
     
     output = args.input if args.output is None else args.output    
     
-    def _read_batch(dir: str, jobs: int = 1) -> TestData:
+    def _read_batch(dir: str, jobs: int = 1) -> TrainData:
         print(f"Reading {dir}...")
         groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL, memory_map=True)
         
         if len(groups) == 0:
             raise RuntimeError("Empty labels file!")
         
-        print("Reading simulations of length", ts_len)            
+        print("Reading simulations of length", ts_len)   
+        
+        def read_sim(tsid: int) -> pd.Series:    
+            return tsid, pd.read_csv(os.path.join(dir, f"sims/tseries{tsid}.csv"), index_col=0, memory_map=True)['p0']     
 
         iterator: Any = Parallel(
             n_jobs=jobs,
@@ -291,11 +297,11 @@ if __name__ == "__main__":
             prefer="threads",
             require="sharedmem",
         )(
-            delayed(lambda tsid: tsid, pd.read_csv(os.path.join(dir, f"sims/tseries{tsid}.csv"), index_col=0, memory_map=True)['p0'])(int(tsid))
+            delayed(read_sim)(int(tsid))
             for tsid in groups.index.values
         )
 
-        resids: dict[int, np.ndarray[tuple[int], np.dtype[np.float64]]] = dict(iterator)
+        sims: dict[int, pd.Series] = dict(iterator)
         
         labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL, memory_map=True)
         print("Read", dir)
