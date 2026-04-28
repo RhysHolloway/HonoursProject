@@ -58,7 +58,10 @@ def train(
         case _:
             raise ValueError("Please provide valid type as input: lrpad, lpad")
     
-    def to_traindata(resids: np.ndarray[tuple[int], np.dtype[np.float64]]) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
+    residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
+    
+    def to_traindata(tsid: int) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
+        resids = residualize(sims[tsid])
         
         if len(resids) == 0:
             return resids 
@@ -91,13 +94,8 @@ def train(
     model_path = os.path.join(output, model_name)
     
     print("Computing training data from simulations...")
-    
-    residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
 
     print("Calculating", len(labels), "residuals")
-    
-    def resid(tsid: int) -> np.ndarray:
-        return to_traindata(residualize(sims[tsid]))
     
     residerator: Any = Parallel(
         n_jobs=jobs,
@@ -106,7 +104,7 @@ def train(
         require="sharedmem",
         return_as="generator",
     )(
-        delayed(resid)(tsid)
+        delayed(to_traindata)(tsid)
         for tsid in labels.index.to_numpy(dtype=int)
     )
     
