@@ -237,6 +237,8 @@ if __name__ == "__main__":
         
         ts_len = len(pd.read_csv(os.path.join(dir, f"sims/tseries{groups.index[0]}.csv"), index_col=0)['p0'])
         residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
+        
+        print("Reading simulations of length", ts_len)
     
         match args.pad:
             case "lrpad":
@@ -252,6 +254,9 @@ if __name__ == "__main__":
             values = np.array(residualize(sim), dtype=float, copy=True)
             del sim
             
+            if len(values) == 0:
+                return values 
+            
             # Padding and normalizing input sequences
             left_padding = int(pad_left * random.random())
             right_padding = int(pad_right * random.random())
@@ -260,12 +265,17 @@ if __name__ == "__main__":
             if right_padding > 0:
                 values[-right_padding:] = 0
             
-            nonzero = len(values) != 0 and np.any(values != 0)
-            avg = np.mean(np.abs(values[nonzero])) if nonzero else 1.0
-            if not np.isfinite(avg) or avg == 0:
-                avg = 1.0
+            nonzero = values != 0.0
+            nz_values = values[nonzero]
+            if not np.any(nonzero) or len(nz_values) == 0:
+                return values
             
-            return (values / avg).astype(np.float32, copy=False)
+            
+            avg = np.mean(np.abs(nz_values)) if nonzero else 1.0
+            if not np.isfinite(avg) or avg == 0:
+                return values
+            
+            return values / avg
             
             
 
