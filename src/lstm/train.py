@@ -286,7 +286,7 @@ if __name__ == "__main__":
         
         print("Reading simulations of length", ts_len)   
         
-        def read_sim(tsid: int) -> pd.Series:    
+        def read_sim(tsid: int) -> tuple[int, pd.Series]:    
             return tsid, pd.read_csv(os.path.join(dir, f"sims/tseries{tsid}.csv"), index_col=0, memory_map=True)['p0']     
 
         iterator: Any = Parallel(
@@ -303,7 +303,7 @@ if __name__ == "__main__":
         
         labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL, memory_map=True)
         print("Read", dir)
-        return resids, labels, groups
+        return sims, labels, groups
     
     if args.train is not None:
         print("Reading/Generating training data in", args.input)
