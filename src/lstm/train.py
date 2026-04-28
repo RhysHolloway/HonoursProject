@@ -251,7 +251,7 @@ if __name__ == "__main__":
                 raise ValueError("Please provide valid type as input: lrpad, lpad")
 
         def to_traindata(sim: pd.Series) -> np.ndarray:
-            values: np.ndarray[tuple[int], np.dtype[np.floating]] = np.array(residualize(sim), dtype=float, copy=True)
+            values: np.ndarray[tuple[int], np.dtype[np.float64]] = residualize(sim)
             del sim
             
             if len(values) == 0:
@@ -279,7 +279,7 @@ if __name__ == "__main__":
             
             
 
-        def read_resids(seq_id: int) -> tuple[int, np.ndarray]:
+        def read_resids(seq_id: int) -> tuple[int, np.ndarray[tuple[int], np.dtype[np.float64]]]:
             return seq_id, to_traindata(pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0, memory_map=True)['p0'])
 
         iterator: Any = Parallel(

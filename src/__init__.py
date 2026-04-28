@@ -51,7 +51,7 @@ def compute_residuals(data: pd.Series, span: float, method: DetrendMethod | None
             raise ValueError(f"Invalid detrending type: {method}")
     return pd.Series(state - smoothing, index=data.index, name="residuals")
 
-def make_fast_lowess_residualizer(index: Sequence[float | int] | np.ndarray[tuple[int], np.dtype[np.floating | np.int_]], span: float = 0.2) -> Callable[[pd.Series], np.ndarray]:
+def make_fast_lowess_residualizer(index: Sequence[float | int] | np.ndarray[tuple[int], np.dtype[np.floating | np.int_]], span: float = 0.2) -> Callable[[pd.Series], np.ndarray[tuple[int], np.dtype[np.float64]]]:
     from scipy import sparse
 
     x = np.array(index) # time_index(index).to_numpy(dtype=float)
@@ -97,14 +97,14 @@ def make_fast_lowess_residualizer(index: Sequence[float | int] | np.ndarray[tupl
         cols.extend(neighbour_idx.tolist())
         weights.extend(row_weights.tolist())
 
-    smoother = sparse.csr_matrix((weights, (rows, cols)), shape=(n, n), dtype=float)
+    smoother = sparse.csr_matrix((weights, (rows, cols)), shape=(n, n), dtype=np.float64)
 
     def residualize(data: pd.Series) -> np.ndarray:
-        state = data.to_numpy(dtype=float, copy=False)
+        state = data.to_numpy(dtype=np.float64, copy=False)
         if len(state) != n:
             raise ValueError(f"FastLowess residualizer expected length {n}, got {len(state)}")
         if not np.isfinite(state).all():
-            return compute_residuals(data, span=span, method="Lowess").to_numpy(dtype=float, copy=True)
+            return compute_residuals(data, span=span, method="Lowess").to_numpy(dtype=np.float64)
         return state - smoother.dot(state)
 
     return residualize

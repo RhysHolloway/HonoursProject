@@ -569,13 +569,13 @@ def batch(
             if not os.path.exists(labels_path):
                 pd.DataFrame(columns=LABEL_COLS).to_csv(labels_path, index_label=INDEX_COL)
             
-            labels = pd.read_csv(labels_path, index_col=INDEX_COL)
+            labels = pd.read_csv(labels_path, index_col=INDEX_COL, memory_map=True)
             
             for seq_id, bif, null in labels[['bif', 'null']].itertuples(index=True, name=None):
                 biftype: BifType = (bif, null)
                 if counts.count(biftype) < bif_maximum(biftype, bif_max):
                     
-                    sim = pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv"), index_col="time")["p0"]
+                    sim = pd.read_csv(os.path.join(path, f"sims/tseries{seq_id}.csv"), index_col="time", memory_map=True)["p0"]
                     
                     if len(sim) != ts_len:
                         raise RuntimeError(f"Batch {batch_num} loaded simulation {seq_id} with non-matching length {len(sim)}! (expected {ts_len})")
