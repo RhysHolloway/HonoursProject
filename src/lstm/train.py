@@ -96,6 +96,9 @@ def train(
     print("Computing training data from simulations...")
 
     print("Calculating", len(labels), "residuals")
+
+    def prepare_one(tsid: int) -> tuple[int, np.ndarray]:
+        return tsid, to_traindata(tsid)
     
     prepared: dict[int, np.ndarray] = dict(Parallel(
         n_jobs=jobs,
@@ -104,7 +107,7 @@ def train(
         require="sharedmem",
         return_as="generator",
     )(
-        delayed(to_traindata)(tsid)
+        delayed(prepare_one)(tsid)
         for tsid in labels.index.to_numpy(dtype=int)
     )) # type: ignore
 
