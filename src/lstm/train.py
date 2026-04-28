@@ -235,7 +235,7 @@ if __name__ == "__main__":
         if len(groups) == 0:
             raise RuntimeError("Empty labels file!")
         
-        ts_len = len(pd.read_csv(os.path.join(dir, f"sims/tseries{next(groups.index[0])}.csv"), index_col=0)['p0'])
+        ts_len = len(pd.read_csv(os.path.join(dir, f"sims/tseries{groups.index[0]}.csv"), index_col=0)['p0'])
         residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
     
         match args.pad:
