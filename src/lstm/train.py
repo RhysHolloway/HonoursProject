@@ -34,10 +34,8 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precisio
 
 _DEFAULT_EPOCHS = 1500
 
-TestData = tuple[dict[int, np.ndarray], Labels, Groups]
-
 def train(
-    data: TestData,
+    data: TrainData,
     output: str,
     pad: Literal["lpad", "lrpad"],
     name: str = "best_model",
@@ -46,8 +44,43 @@ def train(
     jobs: int = -1,
     verbose: bool = True,
 ) -> Sequential:
-    resids, df_labels, df_groups = data
+    sims, df_labels, df_groups = data
     labels = pd.merge(df_groups, df_labels, left_index=True, right_index=True)
+    ts_len = len(next(iter(sims.values())))
+    
+    match pad:
+        case "lrpad":
+            pad_left = (ts_len // 2) - 25
+            pad_right = pad_left
+        case "lpad":
+            pad_left = ts_len - 50
+            pad_right = 0
+        case _:
+            raise ValueError("Please provide valid type as input: lrpad, lpad")
+    
+    def to_traindata(resids: np.ndarray[tuple[int], np.dtype[np.float64]]) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
+        
+        if len(resids) == 0:
+            return resids 
+        
+        # Padding and normalizing input sequences
+        left_padding = int(pad_left * random.random())
+        right_padding = int(pad_right * random.random())
+        if left_padding > 0:
+            resids[:left_padding] = 0
+        if right_padding > 0:
+            resids[-right_padding:] = 0
+        
+        nonzero: np.ndarray[tuple[int], np.dtype[np.bool]] = resids != 0.0
+        nz_resids = resids[nonzero]
+        if not nonzero.any() or len(nz_resids) == 0:
+            return resids
+        
+        avg = np.mean(np.abs(nz_resids))
+        if not np.isfinite(avg) or avg == 0:
+            return resids
+        
+        return resids / avg 
     
     os.makedirs(output, exist_ok=True)
 
@@ -58,8 +91,23 @@ def train(
     model_path = os.path.join(output, model_name)
     
     print("Computing training data from simulations...")
+    
+    residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
 
     print("Calculating", len(labels), "residuals")
+    
+    residerator: Any = Parallel(
+        n_jobs=jobs,
+        backend="threading",
+        prefer="threads",
+        require="sharedmem",
+        return_as="generator",
+    )(
+        delayed(lambda tsid: to_traindata(residualize(sims[tsid])))(tsid)
+        for tsid in labels.index.to_numpy(dtype=int)
+    )
+    
+    resids: dict[int, np.ndarray] = dict(residerator)
 
     def sequence_ids_for(dataset_id: int) -> np.ndarray:
         return labels.index[labels["dataset_ID"] == dataset_id].to_numpy(dtype=int)
@@ -226,61 +274,16 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    output = args.input if args.output is None else args.output
+    output = args.input if args.output is None else args.output    
     
     def _read_batch(dir: str, jobs: int = 1) -> TestData:
         print(f"Reading {dir}...")
-        groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL)
+        groups: pd.DataFrame = pd.read_csv(os.path.join(dir, "groups.csv"), index_col=INDEX_COL, memory_map=True)
         
         if len(groups) == 0:
             raise RuntimeError("Empty labels file!")
         
-        ts_len = len(pd.read_csv(os.path.join(dir, f"sims/tseries{groups.index[0]}.csv"), index_col=0)['p0'])
-        residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
-        
-        print("Reading simulations of length", ts_len)
-    
-        match args.pad:
-            case "lrpad":
-                pad_left = (ts_len // 2) - 25
-                pad_right = pad_left
-            case "lpad":
-                pad_left = ts_len - 50
-                pad_right = 0
-            case _:
-                raise ValueError("Please provide valid type as input: lrpad, lpad")
-
-        def to_traindata(sim: pd.Series) -> np.ndarray:
-            values: np.ndarray[tuple[int], np.dtype[np.float64]] = residualize(sim)
-            del sim
-            
-            if len(values) == 0:
-                return values 
-            
-            # Padding and normalizing input sequences
-            left_padding = int(pad_left * random.random())
-            right_padding = int(pad_right * random.random())
-            if left_padding > 0:
-                values[:left_padding] = 0
-            if right_padding > 0:
-                values[-right_padding:] = 0
-            
-            nonzero: np.ndarray[tuple[int], np.dtype[np.bool]] = values != 0.0
-            nz_values = values[nonzero]
-            if not nonzero.any() or len(nz_values) == 0:
-                return values
-            
-
-            avg = np.mean(np.abs(nz_values))
-            if not np.isfinite(avg) or avg == 0:
-                return values
-            
-            return values / avg
-            
-            
-
-        def read_resids(seq_id: int) -> tuple[int, np.ndarray[tuple[int], np.dtype[np.float64]]]:
-            return seq_id, to_traindata(pd.read_csv(os.path.join(dir, f"sims/tseries{seq_id}.csv"), index_col=0, memory_map=True)['p0'])
+        print("Reading simulations of length", ts_len)            
 
         iterator: Any = Parallel(
             n_jobs=jobs,
@@ -288,16 +291,15 @@ if __name__ == "__main__":
             prefer="threads",
             require="sharedmem",
         )(
-            delayed(read_resids)(int(seq_id))
-            for seq_id in groups.index.values
+            delayed(lambda tsid: tsid, pd.read_csv(os.path.join(dir, f"sims/tseries{tsid}.csv"), index_col=0, memory_map=True)['p0'])(int(tsid))
+            for tsid in groups.index.values
         )
 
         resids: dict[int, np.ndarray[tuple[int], np.dtype[np.float64]]] = dict(iterator)
         
-        labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL)
+        labels = pd.read_csv(os.path.join(dir, "labels.csv"), index_col=INDEX_COL, memory_map=True)
         print("Read", dir)
         return resids, labels, groups
-
     
     if args.train is not None:
         print("Reading/Generating training data in", args.input)
@@ -338,7 +340,7 @@ if __name__ == "__main__":
             raise RuntimeError("Could not read input folder with error:", e) 
     
     train(
-        data=data,  # type: ignore
+        data=data,
         pad=args.pad,  
         name=args.name,
         output=output,
