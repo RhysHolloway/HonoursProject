@@ -4,7 +4,7 @@ This repository contains code to reproduce data and results in Rhys Holloway's H
 
 ## Setup
 
-Before running code, a local environment for the project can be setup with the Bash shell script `setup.sh`, which when called with the command `source setup.sh` activates the environment.
+Before running code, a local environment for the project can be setup with the Bash shell script `setup.sh`, which when called with the command `source setup.sh` activates the environment. Installation on Windows requires WSL2 to be installed, otherwise `[and-cuda]` must be removed from the `tensorflow` library requirements in `requirements.txt` and `pyproject.toml`.
 
 During the first run the script creates a virtual Python environment and downloads the required libraries.
 

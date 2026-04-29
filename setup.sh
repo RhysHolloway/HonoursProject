@@ -25,6 +25,10 @@ else
     VENV_SCRIPT=Scripts/activate
 fi
 
+if ! command -v python >/dev/null 2>&1; then
+    alias python=python3
+fi
+
 cd $ENV_DIR
 
 if [ ! -d "$PY_VENV_DIR/" ]; then
