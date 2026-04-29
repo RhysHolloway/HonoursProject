@@ -16,7 +16,7 @@ dependencies = [
     "joblib==1.5.2",
     "openpyxl==3.1.5",
     "atomics==1.0.3",
-    "pycont-lite@git+https://github.com/RhysHolloway/PyCont-Lite.git",
+    "pycont-lite@git+https://github.com/RhysHolloway/PyCont-Lite.git@03cee5e1d991f4d0a0cbac874f8c11431dec3d8d",
     "ruptures==1.1.10",
     "statsmodels==0.14.6",
 ]
