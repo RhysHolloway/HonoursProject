@@ -26,7 +26,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from keras.models import load_model, Sequential
 from keras.layers import Dropout, Conv1D, MaxPooling1D, Dense, LSTM, Input
 from keras.optimizers import Adam
-from keras.callbacks import ModelCheckpoint
+from keras.callbacks import ModelCheckpoint, TerminateOnNaN
 from keras.losses import SparseCategoricalCrossentropy
 
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score, classification_report
@@ -60,11 +60,15 @@ def train(
     
     residualize = make_fast_lowess_residualizer(np.arange(0, ts_len))
     
-    def to_traindata(tsid: int) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
-        resids = residualize(sims[tsid])
+    def to_traindata(tsid: int) -> np.ndarray[tuple[int], np.dtype[np.float32]]:
+        resids = np.array(residualize(sims[tsid]), dtype=np.float32, copy=True)
         
         if len(resids) == 0:
             return resids 
+
+        bad_values = ~np.isfinite(resids)
+        if bad_values.any():
+            resids[bad_values] = 0.0
         
         # Padding and normalizing input sequences
         left_padding = int(pad_left * random.random())
@@ -74,16 +78,14 @@ def train(
         if right_padding > 0:
             resids[-right_padding:] = 0
         
-        nonzero: np.ndarray[tuple[int], np.dtype[np.bool]] = resids != 0.0
-        nz_resids = resids[nonzero]
-        if not nonzero.any() or len(nz_resids) == 0:
-            return resids
-        
-        avg = np.mean(np.abs(nz_resids))
+        nonzero: np.ndarray[tuple[int], np.dtype[np.bool_]] = resids != 0.0
+        avg = np.mean(np.abs(resids[nonzero])) if nonzero.any() else 1.0
         if not np.isfinite(avg) or avg == 0:
-            return resids
+            avg = 1.0
         
-        return resids / avg 
+        resids = resids / avg
+        resids[~np.isfinite(resids)] = 0.0
+        return resids.astype(np.float32, copy=False)
     
     os.makedirs(output, exist_ok=True)
 
@@ -118,7 +120,7 @@ def train(
         ids = sequence_ids_for(dataset_id)
         if len(ids) == 0:
             return np.empty((0, ts_len, 1), dtype=np.float32)
-        return np.stack([prepared[tsid] for tsid in ids]).reshape(len(ids), ts_len, 1)
+        return np.stack([prepared[tsid] for tsid in ids]).reshape(len(ids), ts_len, 1).astype(np.float32, copy=False)
     
     train = labelled_seq(1)
     validation = labelled_seq(2)
@@ -130,6 +132,16 @@ def train(
     train_target = labelled_class_seq(1)
     validation_target = labelled_class_seq(2)
     test_target = labelled_class_seq(3)
+
+    def assert_finite_split(split_name: str, values: np.ndarray) -> None:
+        finite = np.isfinite(values)
+        if not finite.all():
+            bad_count = values.size - int(finite.sum())
+            raise ValueError(f"{split_name} contains {bad_count} NaN or Inf values after preprocessing")
+
+    assert_finite_split("Training data", train)
+    assert_finite_split("Validation data", validation)
+    assert_finite_split("Test data", test)
     
     print("Loading or compiling model...")
     
@@ -142,10 +154,23 @@ def train(
             metrics=['accuracy', 'sparse_categorical_accuracy']
         )
 
+    def assert_finite_model_weights(model: Sequential, model_path: str) -> None:
+        bad_count = 0
+        for weights in model.get_weights():
+            finite = np.isfinite(weights)
+            if not finite.all():
+                bad_count += weights.size - int(finite.sum())
+        if bad_count != 0:
+            raise ValueError(
+                f"Existing model checkpoint at {model_path} contains {bad_count} NaN or Inf weights. "
+                "Remove it or train with a new --name so training starts from a fresh model."
+            )
+
     checkpoint_initial_value: float | None = None
     if os.path.exists(model_path):
         print(f"Loading existing model checkpoint from {model_path}...")
         model: Sequential = load_model(model_path) # type: ignore[assignment]
+        assert_finite_model_weights(model, model_path)
 
         input_shape = getattr(model, "input_shape", None)
         if input_shape is not None and tuple(input_shape[1:]) != (ts_len, 1):
@@ -197,6 +222,7 @@ def train(
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[
+            TerminateOnNaN(),
             ModelCheckpoint(
                 model_path,
                 monitor="val_accuracy",
@@ -213,6 +239,7 @@ def train(
     print("Loading best model checkpoint...")
 
     model: Sequential = load_model(model_path) # type: ignore[assignment]
+    assert_finite_model_weights(model, model_path)
     
     print("Testing model...")
     

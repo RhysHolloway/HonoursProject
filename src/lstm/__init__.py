@@ -221,12 +221,12 @@ class LSTM(Model[pd.DataFrame]):
         self.results[dataset] = pd.concat(map(compute, dataset.df.columns))
         
     @staticmethod                
-    def plot(axes: Sequence[Axes], means: pd.DataFrame, transitions: Iterable[int | float] = []):
+    def plot(axes: Sequence[Axes], means: pd.DataFrame, transitions: Iterable[int | float] = [], age: str ="Age (ya BP)"):
         
         last_ax = axes[-1]
         means_ax = axes[-2]
         
-        last_ax.set_xlabel("Age (ya BP)")
+        last_ax.set_xlabel(age)
         
         time = np.abs(time_index(means.index))
         
@@ -256,10 +256,8 @@ class LSTM(Model[pd.DataFrame]):
             loc="center left",
             bbox_to_anchor=(1, 0.5)
         )
-        
 
-
-    def _plot(self: Self, dataset: Dataset, title: bool = True, transitions: Iterable[int | float] = []) -> Figure:
+    def _plot(self: Self, dataset: Dataset, title: bool = True, transitions: Iterable[int | float] = [], age: str = "Age (ya BP)") -> Figure:
         
         preds = self.results[dataset]
         
@@ -285,7 +283,7 @@ class LSTM(Model[pd.DataFrame]):
             for i, col in enumerate(__class__.COLUMNS[:-1]): # All besides null column
                 ax = axes[i]
                 ax.set_title(f"{col} Probability")
-                ax.set_xlabel("Age (ya BP)")
+                ax.set_xlabel(age)
                 ax.set_ylabel("Probability")
                 for feature, data in preds.groupby("variable"): # type: ignore 
                     ax.plot(np.abs(time_index(data.index)), data[col].to_numpy(), label=str(feature))

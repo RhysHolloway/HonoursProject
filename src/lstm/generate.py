@@ -128,6 +128,10 @@ _ModelOutput: TypeAlias = list[_Simulation]
 _2DArray: TypeAlias = np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]
 
 
+def _is_valid_training_sim(sim: Sims, ts_len: int) -> bool:
+    return len(sim) == ts_len and not bool(sim.isna().any())
+
+
 def _needs_sample(counts: Counts, bif_type: BifType, bif_max: int) -> bool:
     return counts.count(bif_type) < bif_maximum(type=bif_type, bif_max=bif_max)
 
@@ -479,16 +483,19 @@ def _simulate(
                 
                 if transit_pos + 1 >= ts_len:
                     start = transit_pos + 1 - ts_len
-                    sims.append((
-                        # Simulations
-                        pd.Series(sim.iloc[start:transit_pos + 1], index=pd.Index(np.arange(ts_len), name="time")),
-                        # Label
-                        bif_type,
-                    ))
-                    
-                    if not null_run and null:
-                        null_run = True
-                        break
+                    sim = sim.iloc[start:transit_pos + 1].copy()
+                    sim.index = pd.Index(np.arange(len(sim)), name="time")
+                    if _is_valid_training_sim(sim, ts_len):
+                        sims.append((
+                            # Simulations
+                            sim,
+                            # Label
+                            bif_type,
+                        ))
+                        
+                        if not null_run and null:
+                            null_run = True
+                            break
     
                 
     return sims
@@ -556,6 +563,7 @@ def batch(
     
     simulations: _Simulations = dict()
     counts = _AtomicCounts()
+    skipped_existing = 0
     
     # Continue from previous state
     label_file = None
@@ -579,6 +587,10 @@ def batch(
                     
                     if len(sim) != ts_len:
                         raise RuntimeError(f"Batch {batch_num} loaded simulation {seq_id} with non-matching length {len(sim)}! (expected {ts_len})")
+
+                    if not _is_valid_training_sim(sim, ts_len):
+                        skipped_existing += 1
+                        continue
                     
                     simulations[seq_id] = (sim, biftype)
                     counts.inc(biftype)
@@ -589,6 +601,8 @@ def batch(
             traceback.print_exception(e)
             
     print("Batch", batch_num, "loaded", len(simulations), "previous simulations")
+    if skipped_existing != 0:
+        print("Batch", batch_num, "skipped", skipped_existing, "existing simulations containing NaN values")
     
     current = max(simulations.keys()) + 1 if len(simulations) != 0 else 1
     if param_jobs is None:
@@ -604,9 +618,9 @@ def batch(
             param_jobs=param_jobs,
         ):
             for result in results:
-                biftype = result[1]
+                sim, biftype = result
                 already_added = any((t, True) in added for t in BIFS) if biftype[1] else biftype in added
-                if _needs_sample(counts, biftype, bif_max) and not already_added:
+                if _needs_sample(counts, biftype, bif_max) and not already_added and _is_valid_training_sim(sim, ts_len):
                     simulations[current] = result
                     counts.inc(biftype)
                     added.add(biftype)

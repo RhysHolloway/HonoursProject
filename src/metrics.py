@@ -104,11 +104,11 @@ class Metrics(Model[pd.DataFrame]):
         return fig
     
     @staticmethod
-    def plot(axs: Sequence[Axes], df: pd.DataFrame, transitions: Iterable[int | float] = []):
+    def plot(axs: Sequence[Axes], df: pd.DataFrame, transitions: Iterable[int | float] = [], age: str = "Age (ya BP)"):
         
         time = np.abs(time_index(df.index))
         
-        axs[-1].set_xlabel(f"Age (ya BP)")
+        axs[-1].set_xlabel(age)
 
         def plot(ax: Axes, data: pd.Series, title: str):
             ax.set_ylabel(title)

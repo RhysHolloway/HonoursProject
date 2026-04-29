@@ -25,10 +25,12 @@ class TestModel(metaclass = abc.ABCMeta):
     def __init__(
         self: Self,
         name: str,
+        age_format: str,
         window: float | int = 0.25,
         sims: int = 10,
     ):
         self.name = name
+        self.age_format = age_format
         self.sims = sims
         self.window = window
         
@@ -115,6 +117,7 @@ class SimModel(TestModel):
         super().__init__(
             name = name,
             sims = sims,
+            age_format="Timesteps before present"
         )
         
         self.de_fun = de_fun
@@ -188,7 +191,7 @@ class SimModel(TestModel):
             
         df = pd.concat([
                     series.to_frame(name="state"), 
-                    compute_residuals(series)
+                    compute_residuals(series, span=0.2)
                     ], axis=1)
             
         self.add_indices(df, forced, tsid)
@@ -291,6 +294,7 @@ class DatasetModel(TestModel):
             name=dataset.name,
             window=window,
             sims=sims,
+            age_format="Age (years before present)"
         )
 
         # Get times prior to transition (in years ago)
@@ -596,7 +600,7 @@ def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.Da
         axis.set_xbound(-0.01, 1)
         axis.set_ylabel("True positive rate") 
         axis.set_aspect('equal', adjustable='box')
-        axis.set_title(f"Window of {start * 100}% - {end * 100}% of data)")
+        axis.set_title(f"Window of {start * 100}% - {end * 100}% of data")
                    
     # fig.suptitle()
     # fig.tight_layout()
@@ -627,7 +631,7 @@ def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.Da
         axes[0].plot(time, means["state"], alpha = 0.7)
         axes[0].plot(time, means["state"] - means["residuals"])
         axes[0].set_ylabel("State")
-        Metrics.plot(axes[1:3], means, transitions=[time[-1]] if forced else [])
+        Metrics.plot(axes[1:3], means, transitions=[time[-1]] if forced else [], age=model.age_format)
     
     if lstm is not None:
         for forced, df in metrics.groupby("forced", dropna=False):
@@ -639,6 +643,7 @@ def plot_metrics(model: TestModel, kind: str, sims: pd.DataFrame, metrics: pd.Da
                 axes = axes[3:5],
                 means = means,
                 transitions=[means.index.get_level_values("time")[-1]] if forced else [],
+                age=model.age_format,
             )
             
     forced_fig.tight_layout()
