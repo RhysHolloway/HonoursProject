@@ -551,6 +551,19 @@ def _num_from_label(t: BifType) -> int:
             case "BP":
                 return 2    
 
+def _next_sequence_id(simulations: _Simulations, start: int = 1) -> int:
+    while start in simulations:
+        start += 1
+    return start
+
+def _labels_from_simulations(simulations: _Simulations) -> Labels:
+    return pd.DataFrame(
+        (
+            (i, _num_from_label(label), label[0], label[1])
+            for i, (_, label) in sorted(simulations.items())
+        ), columns = [INDEX_COL] + LABEL_COLS,
+    ).set_index(INDEX_COL)
+
 def batch(
     batch_num: int, 
     ts_len: int, 
@@ -595,6 +608,7 @@ def batch(
                     simulations[seq_id] = (sim, biftype)
                     counts.inc(biftype)
                           
+            _labels_from_simulations(simulations).to_csv(labels_path)
             label_file = open(labels_path, "a+")
                 
         except Exception as e:
@@ -604,7 +618,7 @@ def batch(
     if skipped_existing != 0:
         print("Batch", batch_num, "skipped", skipped_existing, "existing simulations containing NaN values")
     
-    current = max(simulations.keys()) + 1 if len(simulations) != 0 else 1
+    current = _next_sequence_id(simulations)
     if param_jobs is None:
         param_jobs = os.cpu_count() or 1
 
@@ -627,7 +641,7 @@ def batch(
                     if label_file is not None and path is not None:
                         result[0].to_csv(os.path.join(path, f"sims/tseries{current}.csv"))
                         label_file.write(f"{current},{_num_from_label(biftype)},{biftype[0]},{biftype[1]}\n")
-                    current += 1
+                    current = _next_sequence_id(simulations, current)
 
         if len(added) != 0:
             print("Batch", batch_num, "-", counts)
@@ -638,12 +652,7 @@ def batch(
         
     sims = {i:sims for i, (sims, _) in simulations.items()}
 
-    df_labels: pd.DataFrame = pd.DataFrame(
-        (
-            (i, _num_from_label(label), label[0], label[1])
-            for i, (_, label) in simulations.items()
-        ), columns = [INDEX_COL] + LABEL_COLS,
-    ).set_index(INDEX_COL)
+    df_labels = _labels_from_simulations(simulations)
     
     groups = _create_groups(df_labels, bif_max)
     
